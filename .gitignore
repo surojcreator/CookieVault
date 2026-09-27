@@ -1,0 +1,20 @@
+# ── Sensitive: NEVER commit credential dumps ───────────────────────────
+*.zip
+*.txt
+data.json
+**/CookieVault/data.json
+
+# ── Build artifacts ────────────────────────────────────────────────────
+.build/
+DerivedData/
+*.app/
+*.o
+*.swiftmodule
+
+# ── Xcode noise ────────────────────────────────────────────────────────
+xcuserdata/
+*.xcuserstate
+**/*.xcworkspace/xcuserdata/
+
+# ── macOS ──────────────────────────────────────────────────────────────
+.DS_Store

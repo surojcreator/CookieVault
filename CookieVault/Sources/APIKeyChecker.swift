@@ -1,0 +1,2094 @@
+import Foundation
+import AppKit
+
+// MARK: - API Key Checker Engine
+
+public enum APIKeyChecker {
+
+    // Tuned session: many parallel connections per host + shorter timeout, so bulk
+    // checks of the same provider don't serialize on URLSession's default 6-per-host cap.
+    static let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.httpMaximumConnectionsPerHost = 24
+        cfg.timeoutIntervalForRequest = 9
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
+
+    // MARK: - Check Result Structure
+    public struct CheckResult {
+        public var status: CheckStatus
+        public var snippet: String?
+        public var details: KeyDetails?
+
+        public init(status: CheckStatus, snippet: String? = nil, details: KeyDetails? = nil) {
+            self.status = status
+            self.snippet = snippet
+            self.details = details
+        }
+    }
+
+    // MARK: - Main Check Dispatcher
+    public static func check(key: String, service: String, endpoint: String?) async -> CheckResult {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            return CheckResult(status: .invalid, snippet: "Empty key")
+        }
+
+        // Auto-detect service if generic or mismatch
+        let detectedService = detectService(key: trimmedKey, declaredService: service)
+
+        switch detectedService {
+        // --- AI & LLM Services ---
+        case "openai", "sk_all", "openai_org":
+            return await checkOpenAI(key: trimmedKey)
+        case "anthropic":
+            return await checkAnthropic(key: trimmedKey)
+        case "google_ai":
+            return await checkGoogleAI(key: trimmedKey)
+        case "openrouter":
+            return await checkOpenRouter(key: trimmedKey)
+        case "groq":
+            return await checkGroq(key: trimmedKey)
+        case "deepseek":
+            return await checkDeepSeek(key: trimmedKey)
+        case "huggingface":
+            return await checkHuggingFace(key: trimmedKey)
+        case "cohere":
+            return await checkCohere(key: trimmedKey)
+        case "replicate":
+            return await checkReplicate(key: trimmedKey)
+        case "mistral":
+            return await checkMistral(key: trimmedKey)
+        case "together":
+            return await checkTogetherAI(key: trimmedKey)
+        case "fireworks":
+            return await checkFireworksAI(key: trimmedKey)
+        case "cerebras":
+            return await checkCerebras(key: trimmedKey)
+        case "xai":
+            return await checkXAI(key: trimmedKey)
+        case "perplexity":
+            return await checkPerplexity(key: trimmedKey)
+        case "you_com":
+            return await checkYouCom(key: trimmedKey)
+        case "tavily":
+            return await checkTavily(key: trimmedKey)
+        case "fal":
+            return await checkFalAI(key: trimmedKey)
+        case "anyscale":
+            return await checkAnyscale(key: trimmedKey)
+        case "aimlapi":
+            return await checkAIMLAPI(key: trimmedKey)
+        case "runpod":
+            return await checkRunPod(key: trimmedKey)
+        case "voyage":
+            return await checkVoyageAI(key: trimmedKey)
+        case "exa":
+            return await checkExaAI(key: trimmedKey)
+        case "langsmith":
+            return await checkLangSmith(key: trimmedKey)
+
+        // --- Cloud Infrastructure & Hostings ---
+        case "aws_access_key":
+            return await checkAWSAccessKey(key: trimmedKey)
+        case "alibaba_cloud":
+            return await checkAlibabaCloud(key: trimmedKey)
+        case "tencent_cloud":
+            return await checkTencentCloud(key: trimmedKey)
+        case "flyio":
+            return await checkFlyIO(key: trimmedKey)
+        case "scaleway":
+            return await checkScaleway(key: trimmedKey)
+        case "render":
+            return await checkRender(key: trimmedKey)
+        case "hyperbrowser":
+            return await checkHyperbrowser(key: trimmedKey)
+        case "browserbase":
+            return await checkBrowserbase(key: trimmedKey)
+
+        // --- Developer Platforms & Repos ---
+        case "github":
+            return await checkGitHub(key: trimmedKey)
+        case "gitlab":
+            return await checkGitLab(key: trimmedKey)
+        case "bitbucket":
+            return await checkBitbucket(key: trimmedKey)
+        case "atlassian":
+            return await checkAtlassian(key: trimmedKey)
+        case "docker":
+            return await checkDockerHub(key: trimmedKey)
+        case "cargo_crates":
+            return await checkCargoCrates(key: trimmedKey)
+        case "vercel":
+            return await checkVercel(key: trimmedKey)
+        case "netlify":
+            return await checkNetlify(key: trimmedKey)
+        case "sonarqube":
+            return await checkSonarQube(key: trimmedKey)
+        case "grafana":
+            return await checkGrafana(key: trimmedKey)
+        case "hashicorp_vault":
+            return await checkHashiCorpVault(key: trimmedKey)
+        case "infisical":
+            return await checkInfisical(key: trimmedKey)
+        case "onepassword":
+            return await check1Password(key: trimmedKey)
+        case "pipedream":
+            return await checkPipedream(key: trimmedKey)
+
+        // --- Messaging, Chatbots & Email ---
+        case "telegram_bot", "1635646211_@pkbtv_@sackion_@sakione_bot":
+            return await checkTelegramBot(key: trimmedKey)
+        case "discord_bot":
+            return await checkDiscordBot(key: trimmedKey)
+        case "discord_webhook":
+            return await checkDiscordWebhook(key: trimmedKey)
+        case "slack":
+            return await checkSlack(key: trimmedKey)
+        case "slack_webhook":
+            return await checkSlackWebhook(key: trimmedKey)
+        case "teams_webhook":
+            return await checkTeamsWebhook(key: trimmedKey)
+        case "twilio":
+            return await checkTwilio(key: trimmedKey)
+        case "sendgrid":
+            return await checkSendGrid(key: trimmedKey)
+        case "mailchimp":
+            return await checkMailchimp(key: trimmedKey)
+        case "mailgun":
+            return await checkMailgun(key: trimmedKey)
+        case "postmark":
+            return await checkPostmark(key: trimmedKey)
+        case "brevo":
+            return await checkBrevo(key: trimmedKey)
+        case "resend":
+            return await checkResend(key: trimmedKey)
+        case "klaviyo":
+            return await checkKlaviyo(key: trimmedKey)
+        case "intercom":
+            return await checkIntercom(key: trimmedKey)
+
+        // --- Databases, URIs & Vector Engines ---
+        case "pinecone":
+            return await checkPinecone(key: trimmedKey)
+        case "mongodb_uri":
+            return checkURIString(trimmedKey, dbType: "MongoDB", defaultPort: 27017)
+        case "postgres_uri":
+            return checkURIString(trimmedKey, dbType: "PostgreSQL", defaultPort: 5432)
+        case "mysql_uri":
+            return checkURIString(trimmedKey, dbType: "MySQL", defaultPort: 3306)
+        case "redis_uri":
+            return checkURIString(trimmedKey, dbType: "Redis", defaultPort: 6379)
+        case "amqp_uri":
+            return checkURIString(trimmedKey, dbType: "AMQP RabbitMQ", defaultPort: 5672)
+        case "elasticsearch_uri":
+            return checkURIString(trimmedKey, dbType: "Elasticsearch", defaultPort: 9200)
+        case "neon":
+            return await checkNeon(key: trimmedKey)
+        case "supabase":
+            return await checkSupabase(key: trimmedKey)
+        case "airtable":
+            return await checkAirtable(key: trimmedKey)
+        case "notion":
+            return await checkNotion(key: trimmedKey)
+
+        // --- Payments & E-Commerce ---
+        case "stripe":
+            return await checkStripe(key: trimmedKey)
+        case "razorpay":
+            return await checkRazorpay(key: trimmedKey)
+        case "shopify":
+            return await checkShopify(key: trimmedKey)
+        case "square":
+            return await checkSquare(key: trimmedKey)
+        case "checkout":
+            return await checkCheckout(key: trimmedKey)
+        case "flutterwave":
+            return await checkFlutterwave(key: trimmedKey)
+
+        // --- Audio, Speech, Maps & Monitoring ---
+        case "elevenlabs":
+            return await checkElevenLabs(key: trimmedKey)
+        case "deepl":
+            return await checkDeepL(key: trimmedKey)
+        case "mapbox":
+            return await checkMapbox(key: trimmedKey)
+        case "mux":
+            return await checkMux(key: trimmedKey)
+        case "sentry":
+            return await checkSentry(key: trimmedKey)
+        case "sentry_dsn":
+            return checkSentryDSN(trimmedKey)
+        case "launchdarkly":
+            return await checkLaunchDarkly(key: trimmedKey)
+        case "pagerduty":
+            return await checkPagerDuty(key: trimmedKey)
+        case "livekit":
+            return await checkLiveKit(key: trimmedKey)
+        case "figma":
+            return await checkFigma(key: trimmedKey)
+
+        // --- Tools, Productivity & Social ---
+        case "clickup":
+            return await checkClickUp(key: trimmedKey)
+        case "trello":
+            return await checkTrello(key: trimmedKey)
+        case "typeform":
+            return await checkTypeform(key: trimmedKey)
+        case "dropbox":
+            return await checkDropbox(key: trimmedKey)
+        case "facebook":
+            return await checkFacebook(key: trimmedKey)
+        case "firebase_fcm":
+            return await checkFirebaseFCM(key: trimmedKey)
+        case "apify":
+            return await checkApify(key: trimmedKey)
+        case "capsolver":
+            return await checkCapSolver(key: trimmedKey)
+        case "riot":
+            return await checkRiot(key: trimmedKey)
+        case "spotify":
+            return await checkSpotify(key: trimmedKey)
+
+        case "datadog":       return await checkDatadog(key: trimmedKey)
+        case "digitalocean":  return await checkDigitalOcean(key: trimmedKey)
+        case "heroku":        return await checkHeroku(key: trimmedKey)
+        case "newrelic":      return await checkNewRelic(key: trimmedKey)
+        case "npm":           return await checkNPM(key: trimmedKey)
+        case "firecrawl":     return await checkFirecrawl(key: trimmedKey)
+        case "jina":          return await checkJina(key: trimmedKey)
+        case "openai_asst":   return await checkOpenAI(key: trimmedKey)
+        case "all_discord_tokens", "valid_discord_tokens", "discord_user":
+            return await checkDiscordUser(key: trimmedKey)
+
+        default:
+            if let endpoint, let url = URL(string: endpoint) {
+                return await genericHTTPCheck(key: trimmedKey, url: url)
+            }
+            return checkGenericTokenFormat(key: trimmedKey, service: service)
+        }
+    }
+
+    // MARK: - Added service checkers (gap coverage)
+
+    // Datadog — API key validation endpoint.
+    private static func checkDatadog(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.datadoghq.com/api/v1/validate") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "DD-API-KEY")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
+            if code == 200 { d.planOrTier = "Datadog API"; return CheckResult(status: .valid, snippet: "Valid Datadog API key", details: d) }
+            if code == 403 { return CheckResult(status: .invalid, snippet: "Invalid Datadog API key") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // DigitalOcean — account endpoint.
+    private static func checkDigitalOcean(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.digitalocean.com/v2/account") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(800), encoding: .utf8)
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let acc = j["account"] as? [String: Any] {
+                    d.email = acc["email"] as? String
+                    d.planOrTier = (acc["status"] as? String)?.capitalized
+                    if let limit = acc["droplet_limit"] as? Int { d.balanceOrQuota = "Droplet limit: \(limit)" }
+                }
+                return CheckResult(status: .valid, snippet: "Valid DigitalOcean token (\(d.email ?? "account"))", details: d)
+            }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid DigitalOcean token") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // Heroku — account endpoint (needs the versioned Accept header).
+    private static func checkHeroku(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.heroku.com/account") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.heroku+json; version=3", forHTTPHeaderField: "Accept")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(800), encoding: .utf8)
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    d.email = j["email"] as? String
+                    d.accountName = j["name"] as? String
+                    d.planOrTier = (j["verified"] as? Bool) == true ? "Verified" : "Unverified"
+                }
+                return CheckResult(status: .valid, snippet: "Valid Heroku token (\(d.email ?? "account"))", details: d)
+            }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid Heroku token") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // New Relic — REST API key via X-Api-Key.
+    private static func checkNewRelic(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.newrelic.com/v2/applications.json") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-Api-Key")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
+            if code == 200 { d.planOrTier = "New Relic REST API"; return CheckResult(status: .valid, snippet: "Valid New Relic API key", details: d) }
+            if code == 401 || code == 403 { return CheckResult(status: .invalid, snippet: "Invalid New Relic API key") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // npm — whoami.
+    private static func checkNPM(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://registry.npmjs.org/-/whoami") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(400), encoding: .utf8)
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { d.accountName = j["username"] as? String }
+                return CheckResult(status: .valid, snippet: "Valid npm token (@\(d.accountName ?? "user"))", details: d)
+            }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid npm token") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // Firecrawl — credit usage.
+    private static func checkFirecrawl(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.firecrawl.dev/v1/team/credit-usage") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dd = j["data"] as? [String: Any], let credits = dd["remaining_credits"] {
+                    d.balanceOrQuota = "Credits: \(credits)"
+                }
+                return CheckResult(status: .valid, snippet: d.balanceOrQuota ?? "Valid Firecrawl key", details: d)
+            }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid Firecrawl key") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // Jina AI — minimal embeddings probe (200/402 valid, 401 invalid).
+    private static func checkJina(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.jina.ai/v1/embeddings") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 12)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": "jina-embeddings-v3", "input": ["ping"]])
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(500), encoding: .utf8)
+            if code == 200 || code == 402 { d.planOrTier = "Jina AI"; return CheckResult(status: code == 402 ? .quotaExceeded : .valid, snippet: code == 402 ? "Valid but out of tokens" : "Valid Jina AI key", details: d) }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid Jina AI key") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // Discord user token (not a bot token).
+    private static func checkDiscordUser(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://discord.com/api/v10/users/@me") else { return CheckResult(status: .error, snippet: "Invalid URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(800), encoding: .utf8)
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let uname = j["username"] as? String ?? "user"
+                    d.accountName = uname
+                    d.email = j["email"] as? String
+                    if let mfa = j["mfa_enabled"] as? Bool { d.planOrTier = mfa ? "2FA on" : "2FA off" }
+                    if (j["verified"] as? Bool) == true { d.permissions = ["verified"] }
+                }
+                return CheckResult(status: .valid, snippet: "Valid Discord user: \(d.accountName ?? "user")", details: d)
+            }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid Discord user token") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // MARK: - Auto-Detection
+    public static func detectService(key: String, declaredService: String) -> String {
+        let s = declaredService.lowercased()
+            .replacingOccurrences(of: ".txt", with: "")
+            .replacingOccurrences(of: ".json", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if s != "unknown" && s != "generic" && !s.isEmpty && s != "keys" {
+            return s
+        }
+        if key.hasPrefix("sk-ant-") { return "anthropic" }
+        if key.hasPrefix("sk-or-") { return "openrouter" }
+        if key.hasPrefix("ghp_") || key.hasPrefix("gho_") || key.hasPrefix("github_pat_") { return "github" }
+        if key.hasPrefix("sk_live_") || key.hasPrefix("rk_live_") || key.hasPrefix("pk_live_") { return "stripe" }
+        if key.hasPrefix("AKIA") || key.hasPrefix("ASIA") { return "aws_access_key" }
+        if key.hasPrefix("mongodb://") || key.hasPrefix("mongodb+srv://") { return "mongodb_uri" }
+        if key.hasPrefix("postgres://") || key.hasPrefix("postgresql://") { return "postgres_uri" }
+        if key.hasPrefix("mysql://") { return "mysql_uri" }
+        if key.hasPrefix("redis://") || key.hasPrefix("rediss://") { return "redis_uri" }
+        if key.hasPrefix("amqp://") || key.hasPrefix("amqps://") { return "amqp_uri" }
+        if key.contains("discord.com/api/webhooks") { return "discord_webhook" }
+        if key.contains("hooks.slack.com/services") { return "slack_webhook" }
+        if key.contains("office.com/webhook") { return "teams_webhook" }
+        if key.hasPrefix("gsk_") { return "groq" }
+        if key.hasPrefix("hf_") { return "huggingface" }
+        if key.hasPrefix("r8_") { return "replicate" }
+        if key.hasPrefix("re_") { return "resend" }
+        if key.hasPrefix("SG.") { return "sendgrid" }
+        if key.hasPrefix("AIza") { return "google_ai" }
+        if key.hasPrefix("ydc_") { return "you_com" }
+        if key.hasPrefix("xai-") { return "xai" }
+        if key.hasPrefix("secret_") { return "notion" }
+        if key.hasPrefix("pat.") { return "airtable" }
+        if key.hasPrefix("xoxb-") || key.hasPrefix("xoxp-") || key.hasPrefix("xapp-") { return "slack" }
+        if key.contains(":") && key.split(separator: ":").first?.allSatisfy({ $0.isNumber }) == true {
+            return "telegram_bot"
+        }
+        if key.hasPrefix("sk-") { return "openai" }
+        return s
+    }
+
+    // MARK: - Individual Service Implementations
+
+    // 1. OpenAI
+    private static func checkOpenAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.openai.com/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var models: [String] = []
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dataArr = json["data"] as? [[String: Any]] {
+                    models = dataArr.compactMap { $0["id"] as? String }.sorted()
+                }
+                var details = KeyDetails()
+                details.models = models
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+                details.planOrTier = models.contains(where: { $0.contains("gpt-4") || $0.contains("o1") }) ? "GPT-4 / Reasoning Tier" : "Standard"
+                details.balanceOrQuota = "\(models.count) models available"
+
+                let summary = "Valid (\(models.count) models: \(models.prefix(3).joined(separator: ", ")))"
+                return CheckResult(status: .valid, snippet: summary, details: details)
+            } else if code == 429 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 429
+                details.rawSnippet = snippet
+                details.balanceOrQuota = "Quota Exceeded (Add credits)"
+                return CheckResult(status: .quotaExceeded, snippet: "Insufficient quota / billing exhausted", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid or revoked key (HTTP 401)")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code): \(snippet.prefix(100))")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 2. Anthropic
+    private static func checkAnthropic(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.anthropic.com/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var models: [String] = []
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dataArr = json["data"] as? [[String: Any]] {
+                    models = dataArr.compactMap { $0["id"] as? String }
+                }
+                var details = KeyDetails()
+                details.models = models
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+                details.planOrTier = "Claude API Access"
+                details.balanceOrQuota = "\(models.count) models available"
+
+                return CheckResult(status: .valid, snippet: "Valid (\(models.count) models)", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Anthropic API key (HTTP 401)")
+            } else if code == 429 {
+                return CheckResult(status: .rateLimited, snippet: "Rate limited or credit exhausted (HTTP 429)")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 3. Google AI / Gemini
+    private static func checkGoogleAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var models: [String] = []
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let arr = json["models"] as? [[String: Any]] {
+                    models = arr.compactMap { ($0["name"] as? String)?.replacingOccurrences(of: "models/", with: "") }
+                }
+                var details = KeyDetails()
+                details.models = models
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+                details.planOrTier = "Gemini API"
+                details.balanceOrQuota = "\(models.count) models available"
+
+                return CheckResult(status: .valid, snippet: "Valid (\(models.count) Gemini models)", details: details)
+            } else if code == 400 || code == 403 {
+                return CheckResult(status: .invalid, snippet: "Invalid Google AI key (HTTP \(code))")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 4. OpenRouter
+    private static func checkOpenRouter(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://openrouter.ai/api/v1/auth/key") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let d = json["data"] as? [String: Any] {
+                    let label = d["label"] as? String
+                    let usage = d["usage"] as? Double ?? 0.0
+                    let limit = d["limit"] as? Double
+                    let isFree = d["is_free_tier"] as? Bool ?? false
+
+                    details.accountName = label ?? "OpenRouter Key"
+                    details.planOrTier = isFree ? "Free Tier" : "Paid Tier"
+                    if let limit {
+                        details.balanceOrQuota = String(format: "Usage: $%.3f / Limit: $%.2f", usage, limit)
+                    } else {
+                        details.balanceOrQuota = String(format: "Usage: $%.3f (No limit)", usage)
+                    }
+                }
+                return CheckResult(status: .valid, snippet: details.balanceOrQuota ?? "Valid OpenRouter key", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid OpenRouter key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 5. Groq
+    private static func checkGroq(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.groq.com/openai/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Groq")
+    }
+
+    // 6. DeepSeek
+    private static func checkDeepSeek(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.deepseek.com/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.planOrTier = "DeepSeek API"
+
+                if let balUrl = URL(string: "https://api.deepseek.com/user/balance") {
+                    var balReq = URLRequest(url: balUrl, timeoutInterval: 5)
+                    balReq.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    if let (balData, _) = try? await APIKeyChecker.session.data(for: balReq),
+                       let balJson = try? JSONSerialization.jsonObject(with: balData) as? [String: Any],
+                       let balInfo = balJson["balance_infos"] as? [[String: Any]],
+                       let firstBal = balInfo.first {
+                        let cur = firstBal["currency"] as? String ?? "CNY"
+                        let tot = firstBal["total_balance"] as? String ?? "0"
+                        details.balanceOrQuota = "Balance: \(tot) \(cur)"
+                    }
+                }
+                return CheckResult(status: .valid, snippet: details.balanceOrQuota ?? "Valid DeepSeek API key", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid DeepSeek key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 7. HuggingFace
+    private static func checkHuggingFace(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://huggingface.co/api/whoami") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let name = json["name"] as? String
+                    let email = json["email"] as? String
+                    let type = json["type"] as? String
+                    details.accountName = name
+                    details.email = email
+                    details.planOrTier = type?.capitalized ?? "User"
+                }
+                return CheckResult(status: .valid, snippet: "Valid: @\(details.accountName ?? "user")", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid HuggingFace token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 8. Cohere
+    private static func checkCohere(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.cohere.ai/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Cohere")
+    }
+
+    // 9. Replicate
+    private static func checkReplicate(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.replicate.com/v1/account") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    details.accountName = json["username"] as? String
+                    details.planOrTier = json["type"] as? String
+                }
+                return CheckResult(status: .valid, snippet: "Valid Replicate: @\(details.accountName ?? "user")", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Replicate Token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 10. Mistral
+    private static func checkMistral(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.mistral.ai/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Mistral")
+    }
+
+    // 11. Together AI
+    private static func checkTogetherAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.together.xyz/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Together AI")
+    }
+
+    // 12. Fireworks AI
+    private static func checkFireworksAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.fireworks.ai/inference/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Fireworks AI")
+    }
+
+    // 13. Cerebras
+    private static func checkCerebras(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.cerebras.ai/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Cerebras")
+    }
+
+    // 14. xAI (Grok)
+    private static func checkXAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.x.ai/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "xAI (Grok)")
+    }
+
+    // 15. Perplexity
+    private static func checkPerplexity(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.perplexity.ai/chat/completions") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": "sonar",
+            "messages": [["role": "user", "content": "ping"]]
+        ])
+        let start = Date()
+        do {
+            let (_, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                return CheckResult(status: .valid, snippet: "Valid Perplexity API Key", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Perplexity Key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 16. You.com
+    private static func checkYouCom(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.ydc-index.io/search?query=test") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-API-Key")
+        return await httpCheckGenericBearer(req: req, provider: "You.com")
+    }
+
+    // 17. Tavily
+    private static func checkTavily(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.tavily.com/search") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["api_key": key, "query": "ping"])
+        return await httpCheckGenericBearer(req: req, provider: "Tavily")
+    }
+
+    // 18. Fal.ai
+    private static func checkFalAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://rest.fal.ai/tokens") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Key \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Fal.ai")
+    }
+
+    // 19. Anyscale
+    private static func checkAnyscale(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.endpoints.anyscale.com/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "Anyscale")
+    }
+
+    // 20. AIMLAPI
+    private static func checkAIMLAPI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.aimlapi.com/v1/models") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckModels(req: req, provider: "AI ML API")
+    }
+
+    // 21. RunPod
+    private static func checkRunPod(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.runpod.io/graphql?api_key=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": "{ myself { id email } }"])
+        return await httpCheckGenericBearer(req: req, provider: "RunPod")
+    }
+
+    // 22. Voyage AI
+    private static func checkVoyageAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.voyageai.com/v1/embeddings") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": "voyage-2", "input": ["test"]])
+        return await httpCheckGenericBearer(req: req, provider: "Voyage AI")
+    }
+
+    // 23. Exa AI
+    private static func checkExaAI(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.exa.ai/search") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": "test"])
+        return await httpCheckGenericBearer(req: req, provider: "Exa AI")
+    }
+
+    // 24. LangSmith
+    private static func checkLangSmith(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.smith.langchain.com/info") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        return await httpCheckGenericBearer(req: req, provider: "LangSmith")
+    }
+
+    // 25. AWS Access Key
+    private static func checkAWSAccessKey(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "AWS IAM Credential"
+        let isAccessKey = key.hasPrefix("AKIA") || key.hasPrefix("ASIA")
+        if isAccessKey && key.count >= 16 && key.count <= 128 {
+            details.accountName = String(key.prefix(12))
+            details.balanceOrQuota = key.hasPrefix("AKIA") ? "Permanent Key" : "Temporary Session Key"
+            return CheckResult(status: .valid, snippet: "Valid AWS Key (\(details.balanceOrQuota ?? ""))", details: details)
+        } else {
+            return CheckResult(status: .invalid, snippet: "Invalid AWS Access Key format")
+        }
+    }
+
+    // 26. Alibaba Cloud
+    private static func checkAlibabaCloud(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Alibaba Cloud AccessKey"
+        if key.hasPrefix("LTAI") && key.count >= 16 {
+            return CheckResult(status: .valid, snippet: "Valid Alibaba AccessKey ID (\(key.prefix(8))...)", details: details)
+        } else if key.count >= 12 {
+            return CheckResult(status: .valid, snippet: "Valid Alibaba Cloud Credential", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Alibaba Cloud Key format")
+    }
+
+    // 27. Tencent Cloud
+    private static func checkTencentCloud(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Tencent Cloud SecretID"
+        if key.hasPrefix("AKID") && key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Tencent SecretId", details: details)
+        } else if key.count >= 16 {
+            return CheckResult(status: .valid, snippet: "Valid Tencent Cloud Key", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Tencent SecretId format")
+    }
+
+    // 28. Fly.io
+    private static func checkFlyIO(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.fly.io/graphql") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": "{ viewer { email } }"])
+        return await httpCheckGenericBearer(req: req, provider: "Fly.io")
+    }
+
+    // 29. Scaleway
+    private static func checkScaleway(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.scaleway.com/account/v1/regions") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-Auth-Token")
+        return await httpCheckGenericBearer(req: req, provider: "Scaleway")
+    }
+
+    // 30. Render
+    private static func checkRender(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.render.com/v1/owners") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Render")
+    }
+
+    // 31. Hyperbrowser
+    private static func checkHyperbrowser(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Hyperbrowser Key"
+        if key.count >= 16 {
+            return CheckResult(status: .valid, snippet: "Valid Hyperbrowser API key", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Hyperbrowser key format")
+    }
+
+    // 32. Browserbase
+    private static func checkBrowserbase(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://www.browserbase.com/v1/sessions") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-BB-API-Key")
+        return await httpCheckGenericBearer(req: req, provider: "Browserbase")
+    }
+
+    // 33. GitHub
+    private static func checkGitHub(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.github.com/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("CookieVault/1.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let httpResp = response as? HTTPURLResponse
+            let code = httpResp?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+
+                if let scopesHeader = httpResp?.value(forHTTPHeaderField: "X-OAuth-Scopes") {
+                    let scopes = scopesHeader.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    details.permissions = scopes
+                }
+
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let login = json["login"] as? String
+                    let name = json["name"] as? String
+                    details.accountName = login ?? name
+                    details.email = json["email"] as? String
+                    if let plan = json["plan"] as? [String: Any], let planName = plan["name"] as? String {
+                        details.planOrTier = "GitHub \(planName.capitalized)"
+                    }
+                    // Pack the useful profile facts into extra "permission" chips + balance line.
+                    var facts: [String] = []
+                    if let repos = json["public_repos"] as? Int { facts.append("\(repos) public repos") }
+                    if let priv = json["total_private_repos"] as? Int, priv > 0 { facts.append("\(priv) private repos") }
+                    if let followers = json["followers"] as? Int { facts.append("\(followers) followers") }
+                    if let company = json["company"] as? String, !company.isEmpty { facts.append(company) }
+                    if let loc = json["location"] as? String, !loc.isEmpty { facts.append(loc) }
+                    if let tfa = json["two_factor_authentication"] as? Bool { facts.append(tfa ? "2FA on" : "2FA off") }
+                    if let created = json["created_at"] as? String { facts.append("since \(created.prefix(4))") }
+                    details.balanceOrQuota = facts.prefix(3).joined(separator: " · ")
+                    // Append remaining facts to the scopes list so they surface as chips.
+                    if facts.count > 3 { details.permissions = (details.permissions ?? []) + Array(facts.dropFirst(3)) }
+                }
+
+                let summary = "Valid: @\(details.accountName ?? "user") — \(details.planOrTier ?? "GitHub") (\(details.permissions?.count ?? 0) scopes)"
+                return CheckResult(status: .valid, snippet: summary, details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Bad GitHub credentials (HTTP 401)")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 34. GitLab
+    private static func checkGitLab(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://gitlab.com/api/v4/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "GitLab")
+    }
+
+    // 35. Bitbucket
+    private static func checkBitbucket(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.bitbucket.org/2.0/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Bitbucket")
+    }
+
+    // 36. Atlassian
+    private static func checkAtlassian(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Atlassian API Token"
+        if key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Atlassian API Token format", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Atlassian API Token format")
+    }
+
+    // 37. Docker Hub
+    private static func checkDockerHub(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://hub.docker.com/v2/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Docker Hub")
+    }
+
+    // 38. Cargo Crates.io
+    private static func checkCargoCrates(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://crates.io/api/v1/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "Authorization")
+        req.setValue("CookieVault/1.0", forHTTPHeaderField: "User-Agent")
+        return await httpCheckGenericBearer(req: req, provider: "Cargo Crates.io")
+    }
+
+    // 39. Vercel
+    private static func checkVercel(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.vercel.com/v2/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let user = json["user"] as? [String: Any] {
+                    details.accountName = user["username"] as? String ?? user["name"] as? String
+                    details.email = user["email"] as? String
+                }
+                return CheckResult(status: .valid, snippet: "Valid Vercel User (@\(details.accountName ?? "user"))", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Vercel Token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 40. Netlify
+    private static func checkNetlify(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.netlify.com/api/v1/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Netlify")
+    }
+
+    // 41. SonarQube
+    private static func checkSonarQube(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "SonarQube User Token"
+        if key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid SonarQube Token format", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid SonarQube Token format")
+    }
+
+    // 42. Grafana
+    private static func checkGrafana(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Grafana API Key"
+        if key.hasPrefix("ey") || key.count >= 24 {
+            return CheckResult(status: .valid, snippet: "Valid Grafana API Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Grafana Token format")
+    }
+
+    // 43. HashiCorp Vault
+    private static func checkHashiCorpVault(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Vault Token"
+        if key.hasPrefix("hvs.") || key.hasPrefix("s.") || key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid HashiCorp Vault Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Vault Token format")
+    }
+
+    // 44. Infisical
+    private static func checkInfisical(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Infisical Secret Token"
+        if key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Infisical Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Infisical Token format")
+    }
+
+    // 45. 1Password
+    private static func check1Password(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "1Password Service Account Token"
+        if key.hasPrefix("eyJ") || key.count >= 30 {
+            return CheckResult(status: .valid, snippet: "Valid 1Password Service Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid 1Password Token format")
+    }
+
+    // 46. Pipedream
+    private static func checkPipedream(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.pipedream.com/v1/users/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Pipedream")
+    }
+
+    // 47. Telegram Bot
+    private static func checkTelegramBot(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.telegram.org/bot\(key)/getMe") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let res = json["result"] as? [String: Any] {
+                    let username = res["username"] as? String ?? ""
+                    let firstName = res["first_name"] as? String ?? ""
+                    let botId = res["id"] as? Int ?? 0
+
+                    details.accountName = firstName.isEmpty ? "@\(username)" : "@\(username) (\(firstName))"
+                    details.planOrTier = "Telegram Bot (ID: \(botId))"
+                }
+
+                return CheckResult(status: .valid, snippet: "Valid Bot: \(details.accountName ?? "Bot")", details: details)
+            } else if code == 401 || code == 404 {
+                return CheckResult(status: .invalid, snippet: "Unauthorized bot token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 48. Discord Bot
+    private static func checkDiscordBot(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://discord.com/api/v10/users/@me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bot \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let username = json["username"] as? String ?? "Discord Bot"
+                    let id = json["id"] as? String ?? ""
+                    details.accountName = username
+                    details.planOrTier = "Discord Bot (ID: \(id))"
+                }
+                return CheckResult(status: .valid, snippet: "Valid: \(details.accountName ?? "Discord Bot")", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Discord bot token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 49. Discord Webhook
+    private static func checkDiscordWebhook(key: String) async -> CheckResult {
+        let urlStr = key.hasPrefix("http") ? key : "https://discord.com/api/webhooks/\(key)"
+        guard let url = URL(string: urlStr) else {
+            return CheckResult(status: .error, snippet: "Invalid Webhook URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "GET"
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    details.accountName = json["name"] as? String
+                    details.planOrTier = "Discord Webhook"
+                }
+                return CheckResult(status: .valid, snippet: "Valid Discord Webhook (\(details.accountName ?? "Active"))", details: details)
+            } else if code == 404 || code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Discord Webhook (HTTP \(code))")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 50. Slack Token
+    private static func checkSlack(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://slack.com/api/auth.test") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let ok = json["ok"] as? Bool, ok {
+                    let team = json["team"] as? String ?? ""
+                    let user = json["user"] as? String ?? ""
+                    details.accountName = "\(user) @ \(team)"
+                    details.planOrTier = "Slack API Token"
+                    return CheckResult(status: .valid, snippet: "Valid Slack Token (\(details.accountName ?? "Active"))", details: details)
+                } else {
+                    return CheckResult(status: .invalid, snippet: "Invalid Slack Token")
+                }
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Slack Token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 51. Slack Webhook
+    private static func checkSlackWebhook(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Slack Incoming Webhook"
+        if key.contains("hooks.slack.com/services") || key.count >= 24 {
+            return CheckResult(status: .valid, snippet: "Valid Slack Webhook URL format", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Slack Webhook format")
+    }
+
+    // 52. Teams Webhook
+    private static func checkTeamsWebhook(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "MS Teams Incoming Webhook"
+        if key.contains("webhook") || key.count >= 30 {
+            return CheckResult(status: .valid, snippet: "Valid Teams Webhook URL format", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Teams Webhook format")
+    }
+
+    // 53. Twilio
+    private static func checkTwilio(key: String) async -> CheckResult {
+        let parts = key.components(separatedBy: ":")
+        let sid = parts.first ?? key
+        guard sid.hasPrefix("AC") || sid.hasPrefix("SK") else {
+            return CheckResult(status: .invalid, snippet: "Invalid Twilio Account SID format")
+        }
+        var details = KeyDetails()
+        details.accountName = sid
+        details.planOrTier = "Twilio Account"
+        return CheckResult(status: .valid, snippet: "Valid Twilio Account SID (\(sid.prefix(8))...)", details: details)
+    }
+
+    // 54. SendGrid
+    private static func checkSendGrid(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.sendgrid.com/v3/scopes") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let scopes = json["scopes"] as? [String] {
+                    details.permissions = scopes
+                }
+                return CheckResult(status: .valid, snippet: "Valid SendGrid Key (\(details.permissions?.count ?? 0) scopes)", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid SendGrid Key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 55. Mailchimp
+    private static func checkMailchimp(key: String) async -> CheckResult {
+        let parts = key.components(separatedBy: "-")
+        let dc = parts.count > 1 ? parts.last! : "us1"
+        guard let url = URL(string: "https://\(dc).api.mailchimp.com/3.0/ping") else {
+            return CheckResult(status: .error, snippet: "Invalid Mailchimp DC URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        let authStr = Data("anystring:\(key)".utf8).base64EncodedString()
+        req.setValue("Basic \(authStr)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Mailchimp (\(dc))")
+    }
+
+    // 56. Mailgun
+    private static func checkMailgun(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.mailgun.net/v3/domains") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        let authStr = Data("api:\(key)".utf8).base64EncodedString()
+        req.setValue("Basic \(authStr)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Mailgun")
+    }
+
+    // 57. Postmark
+    private static func checkPostmark(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.postmarkapp.com/server") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-Postmark-Server-Token")
+        return await httpCheckGenericBearer(req: req, provider: "Postmark")
+    }
+
+    // 58. Brevo
+    private static func checkBrevo(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.brevo.com/v3/account") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "api-key")
+        return await httpCheckGenericBearer(req: req, provider: "Brevo")
+    }
+
+    // 59. Resend
+    private static func checkResend(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.resend.com/api-keys") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Resend")
+    }
+
+    // 60. Klaviyo
+    private static func checkKlaviyo(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://a.klaviyo.com/api/accounts/") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Klaviyo-API-Key \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("2023-02-22", forHTTPHeaderField: "revision")
+        return await httpCheckGenericBearer(req: req, provider: "Klaviyo")
+    }
+
+    // 61. Intercom
+    private static func checkIntercom(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.intercom.io/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Intercom")
+    }
+
+    // 62. Pinecone
+    private static func checkPinecone(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.pinecone.io/indexes") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "Api-Key")
+        return await httpCheckGenericBearer(req: req, provider: "Pinecone")
+    }
+
+    // 63. Database URI Checker Helper (MongoDB, Postgres, MySQL, Redis, AMQP, Elasticsearch)
+    private static func checkURIString(_ uri: String, dbType: String, defaultPort: Int) -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "\(dbType) Database URI"
+
+        if let components = URLComponents(string: uri) {
+            let host = components.host ?? "localhost"
+            let port = components.port ?? defaultPort
+            let user = components.user ?? "default"
+            let dbName = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+            details.accountName = "\(user)@\(host):\(port)"
+            details.balanceOrQuota = dbName.isEmpty ? "Connected Host" : "DB: \(dbName)"
+            return CheckResult(status: .valid, snippet: "Valid \(dbType) Connection URI (\(host):\(port))", details: details)
+        } else if uri.contains("://") && uri.count >= 10 {
+            return CheckResult(status: .valid, snippet: "Valid \(dbType) Connection String", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid \(dbType) Connection URI format")
+    }
+
+    // 64. Neon
+    private static func checkNeon(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://console.neon.tech/api/v2/users/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Neon Postgres")
+    }
+
+    // 65. Supabase
+    private static func checkSupabase(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Supabase API Key"
+        if key.hasPrefix("eyJ") || key.count >= 30 {
+            details.balanceOrQuota = "JWT Key Token"
+            return CheckResult(status: .valid, snippet: "Valid Supabase Key Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Supabase key format")
+    }
+
+    // 66. Airtable
+    private static func checkAirtable(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.airtable.com/v0/meta/whoami") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    details.email = json["email"] as? String
+                }
+                return CheckResult(status: .valid, snippet: "Valid Airtable (\(details.email ?? "user"))", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Airtable Token")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 67. Notion
+    private static func checkNotion(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.notion.com/v1/users/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("2022-06-28", forHTTPHeaderField: "Notion-Version")
+        return await httpCheckGenericBearer(req: req, provider: "Notion Integration")
+    }
+
+    // 68. Stripe
+    private static func checkStripe(key: String) async -> CheckResult {
+        if key.hasPrefix("pk_live_") || key.hasPrefix("pk_test_") {
+            var details = KeyDetails()
+            details.planOrTier = key.hasPrefix("pk_live_") ? "Publishable Live Key" : "Publishable Test Key"
+            return CheckResult(status: .valid, snippet: "Valid Stripe Publishable Key", details: details)
+        }
+
+        guard let url = URL(string: "https://api.stripe.com/v1/balance") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        let credentials = Data("\(key):".utf8).base64EncodedString()
+        req.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.planOrTier = key.hasPrefix("sk_live_") || key.hasPrefix("rk_live_") ? "Live Secret Key" : "Test Secret Key"
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let available = json["available"] as? [[String: Any]], let first = available.first,
+                   let amount = first["amount"] as? Int, let cur = first["currency"] as? String {
+                    let formatted = Double(amount) / 100.0
+                    details.balanceOrQuota = String(format: "Available: $%.2f %@", formatted, cur.uppercased())
+                }
+                // Fetch the account profile for business name / country / email.
+                if let acctURL = URL(string: "https://api.stripe.com/v1/account") {
+                    var areq = URLRequest(url: acctURL, timeoutInterval: 8)
+                    areq.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
+                    if let (adata, _) = try? await APIKeyChecker.session.data(for: areq),
+                       let aj = try? JSONSerialization.jsonObject(with: adata) as? [String: Any] {
+                        let biz = (aj["business_profile"] as? [String: Any])?["name"] as? String
+                        details.accountName = biz ?? (aj["settings"] as? [String: Any]).flatMap { ($0["dashboard"] as? [String: Any])?["display_name"] as? String }
+                        details.email = aj["email"] as? String
+                        var perms: [String] = []
+                        if let country = aj["country"] as? String { perms.append(country) }
+                        if let cur = aj["default_currency"] as? String { perms.append(cur.uppercased()) }
+                        if (aj["charges_enabled"] as? Bool) == true { perms.append("charges enabled") }
+                        if (aj["payouts_enabled"] as? Bool) == true { perms.append("payouts enabled") }
+                        if !perms.isEmpty { details.permissions = perms }
+                    }
+                }
+                let summary = "Valid Stripe (\(details.accountName ?? details.planOrTier ?? "account"))"
+                return CheckResult(status: .valid, snippet: summary, details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Stripe Secret Key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 69. Razorpay
+    private static func checkRazorpay(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Razorpay API Key"
+        if key.hasPrefix("rzp_live_") || key.hasPrefix("rzp_test_") || key.count >= 16 {
+            return CheckResult(status: .valid, snippet: "Valid Razorpay Key ID", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Razorpay Key format")
+    }
+
+    // 70. Shopify
+    private static func checkShopify(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Shopify Admin Token"
+        if key.hasPrefix("shpat_") || key.hasPrefix("shpca_") || key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Shopify Access Token", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Shopify Token format")
+    }
+
+    // 71. Square
+    private static func checkSquare(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://connect.squareup.com/v2/locations") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Square")
+    }
+
+    // 72. Checkout.com
+    private static func checkCheckout(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Checkout.com Key"
+        if key.hasPrefix("sk_") || key.hasPrefix("pk_") || key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Checkout.com Key", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Checkout.com Key format")
+    }
+
+    // 73. Flutterwave
+    private static func checkFlutterwave(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.flutterwave.com/v3/balances") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Flutterwave")
+    }
+
+    // 74. ElevenLabs
+    private static func checkElevenLabs(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/user/subscription") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "xi-api-key")
+
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = 200
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let tier = json["tier"] as? String ?? "Standard"
+                    let used = json["character_count"] as? Int ?? 0
+                    let limit = json["character_limit"] as? Int ?? 0
+                    details.planOrTier = "\(tier.capitalized) Plan"
+                    details.balanceOrQuota = "\(used) / \(limit) chars used"
+                }
+                return CheckResult(status: .valid, snippet: details.balanceOrQuota ?? "Valid ElevenLabs key", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid ElevenLabs API key")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    // 75. DeepL
+    private static func checkDeepL(key: String) async -> CheckResult {
+        let isFree = key.hasSuffix(":fx")
+        let urlStr = isFree ? "https://api-free.deepl.com/v2/usage" : "https://api.deepl.com/v2/usage"
+        guard let url = URL(string: urlStr) else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("DeepL-Auth-Key \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "DeepL (\(isFree ? "Free" : "Pro"))")
+    }
+
+    // 76. Mapbox
+    private static func checkMapbox(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.mapbox.com/tokens/v2?access_token=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        return await httpCheckGenericBearer(req: req, provider: "Mapbox")
+    }
+
+    // 77. Mux
+    private static func checkMux(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Mux API Key"
+        if key.contains(":") || key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Mux Token Credentials", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Mux Token format")
+    }
+
+    // 78. Sentry API
+    private static func checkSentry(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://sentry.io/api/0/user/") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Sentry API")
+    }
+
+    // 79. Sentry DSN
+    private static func checkSentryDSN(_ dsn: String) -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Sentry DSN"
+        if (dsn.hasPrefix("http://") || dsn.hasPrefix("https://")) && dsn.contains("@") {
+            return CheckResult(status: .valid, snippet: "Valid Sentry DSN URL", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Sentry DSN format")
+    }
+
+    // 80. LaunchDarkly
+    private static func checkLaunchDarkly(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://app.launchdarkly.com/api/v2/users") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "LaunchDarkly")
+    }
+
+    // 81. PagerDuty
+    private static func checkPagerDuty(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.pagerduty.com/users/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Token token=\(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "PagerDuty")
+    }
+
+    // 82. LiveKit
+    private static func checkLiveKit(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "LiveKit API Key"
+        if key.hasPrefix("API") || key.count >= 16 {
+            return CheckResult(status: .valid, snippet: "Valid LiveKit Key Credentials", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid LiveKit Key format")
+    }
+
+    // 83. Figma
+    private static func checkFigma(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.figma.com/v1/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "X-Figma-Token")
+        return await httpCheckGenericBearer(req: req, provider: "Figma")
+    }
+
+    // 84. ClickUp
+    private static func checkClickUp(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.clickup.com/api/v2/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue(key, forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "ClickUp")
+    }
+
+    // 85. Trello
+    private static func checkTrello(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.trello.com/1/members/me?key=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        return await httpCheckGenericBearer(req: req, provider: "Trello")
+    }
+
+    // 86. Typeform
+    private static func checkTypeform(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.typeform.com/user") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Typeform")
+    }
+
+    // 87. Dropbox
+    private static func checkDropbox(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.dropboxapi.com/2/users/get_current_account") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Dropbox")
+    }
+
+    // 88. Facebook
+    private static func checkFacebook(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://graph.facebook.com/v18.0/me?access_token=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        return await httpCheckGenericBearer(req: req, provider: "Facebook Graph API")
+    }
+
+    // 89. Firebase FCM
+    private static func checkFirebaseFCM(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Firebase FCM Legacy Key"
+        if key.hasPrefix("AAAA") && key.count >= 50 {
+            return CheckResult(status: .valid, snippet: "Valid Firebase FCM Server Key", details: details)
+        } else if key.count >= 30 {
+            return CheckResult(status: .valid, snippet: "Valid Firebase Key Format", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Firebase FCM Key format")
+    }
+
+    // 90. Apify
+    private static func checkApify(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.apify.com/v2/users/me?token=\(key)") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let req = URLRequest(url: url, timeoutInterval: 10)
+        return await httpCheckGenericBearer(req: req, provider: "Apify")
+    }
+
+    // 91. CapSolver
+    private static func checkCapSolver(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.capsolver.com/getBalance") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["clientKey": key])
+        return await httpCheckGenericBearer(req: req, provider: "CapSolver")
+    }
+
+    // 92. Riot Games
+    private static func checkRiot(key: String) async -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "Riot Games API Key"
+        if key.hasPrefix("RGAPI-") || key.count >= 20 {
+            return CheckResult(status: .valid, snippet: "Valid Riot Games API Key", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid Riot API Key format")
+    }
+
+    // 93. Spotify
+    private static func checkSpotify(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.spotify.com/v1/me") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Spotify")
+    }
+
+    // MARK: - Reusable HTTP Helpers
+
+    private static func httpCheckModels(req: URLRequest, provider: String) async -> CheckResult {
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if code == 200 {
+                var models: [String] = []
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let arr = (json["data"] as? [[String: Any]]) ?? (json["models"] as? [[String: Any]]) {
+                    models = arr.compactMap { ($0["id"] as? String) ?? ($0["name"] as? String) }
+                }
+                var details = KeyDetails()
+                details.models = models
+                details.latencyMs = latency
+                details.httpCode = 200
+                details.rawSnippet = snippet
+                details.planOrTier = "\(provider) API"
+                details.balanceOrQuota = "\(models.count) models available"
+
+                return CheckResult(status: .valid, snippet: "Valid (\(models.count) models)", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid \(provider) key (HTTP 401)")
+            } else if code == 429 {
+                return CheckResult(status: .rateLimited, snippet: "Rate limited (HTTP 429)")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code): \(snippet.prefix(100))")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    private static func httpCheckGenericBearer(req: URLRequest, provider: String) async -> CheckResult {
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if (200...299).contains(code) {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = code
+                details.rawSnippet = snippet
+                return CheckResult(status: .valid, snippet: "Valid \(provider) Key (HTTP \(code))", details: details)
+            } else if code == 401 || code == 403 {
+                return CheckResult(status: .invalid, snippet: "Invalid \(provider) Key (HTTP \(code))")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    private static func genericHTTPCheck(key: String, url: URL) async -> CheckResult {
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
+
+            if (200...299).contains(code) {
+                var details = KeyDetails()
+                details.latencyMs = latency
+                details.httpCode = code
+                details.rawSnippet = snippet
+                return CheckResult(status: .valid, snippet: "HTTP \(code) OK", details: details)
+            } else if code == 401 || code == 403 {
+                return CheckResult(status: .invalid, snippet: "HTTP \(code) Unauthorized")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code): \(snippet.prefix(100))")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    private static func checkGenericTokenFormat(key: String, service: String) -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "\(service.replacingOccurrences(of: "_", with: " ").capitalized) Token"
+        if key.count >= 8 && !key.contains(" ") {
+            return CheckResult(status: .valid, snippet: "Valid key format (\(key.count) chars)", details: details)
+        }
+        return CheckResult(status: .invalid, snippet: "Invalid key format")
+    }
+}
