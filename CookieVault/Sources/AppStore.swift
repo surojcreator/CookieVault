@@ -422,6 +422,8 @@ public class AppStore: ObservableObject {
     @Published public var selectedAPIFolder: String? = nil
     @Published public var inspectedKey: APIKey? = nil
     @Published public var showImportAPIKeys = false
+    // Global "filter for all valids" smart view — shows every valid key across every file/type.
+    @Published public var showAllValidKeys: Bool = false
 
     // Navigation & Folder Fold State
     @Published public var currentTab: AppTab = .cookies {
@@ -451,7 +453,11 @@ public class AppStore: ObservableObject {
     @Published public var toastType: ToastType = .info
     private var toastTimer: AnyCancellable?
 
+    // Bump when service/tier derivation logic changes, to force a one-time re-index.
+    private static let indexVersion = 1
+
     public init() {
+        ChromiumLauncher.sweepOldSessions() // clear any leftover browser session profiles
         // Capture saved fold state before any auto-expand overwrites it.
         restoredExpanded = UserDefaults.standard.stringArray(forKey: "cv_expanded") ?? []
         // Restore lightweight UI prefs immediately (no data needed).
@@ -470,6 +476,9 @@ public class AppStore: ObservableObject {
     private func loadPersistedDataAsync() {
         isIndexing = true
         let url = saveURL
+        // Skip the expensive domain re-derivation when the data was already indexed
+        // with the current logic — only the cheap in-memory caches get rebuilt.
+        let alreadyIndexed = UserDefaults.standard.integer(forKey: "cv_index_version") == Self.indexVersion
         Task.detached(priority: .userInitiated) {
             var cookies: [CookieFile] = []
             var apis: [APIKeyFile] = []
@@ -478,37 +487,34 @@ public class AppStore: ObservableObject {
                 cookies = decoded.cookieFiles
                 apis = decoded.apiKeyFiles
             }
-            // Backfill tier/email/plan/service + derive site from domains (pure work).
             var changed = false
-            for i in cookies.indices {
-                let meta = AppStore.extractCookieMetadata(fileName: cookies[i].name, path: cookies[i].path)
-                if cookies[i].tier == .unknown || cookies[i].accountEmail == nil {
-                    cookies[i].tier = meta.tier
-                    cookies[i].accountEmail = meta.email
-                    cookies[i].planName = meta.plan
-                    changed = true
-                }
-                // Service = cookie-domain-derived (authoritative), else filename brand.
-                // (The filename can contain a @gmail address, so it must NOT win over domains.)
-                let chosen = AppStore.deriveSite(from: cookies[i].cookies) ?? meta.service
-                if let chosen, cookies[i].serviceName != chosen {
-                    cookies[i].serviceName = chosen
-                    changed = true
-                }
-            }
-            // Intelligent per-service tier/plan/state classification (fixes mislabels).
             var stateCache: [UUID: AccountState] = [:]
-            stateCache.reserveCapacity(cookies.count)
-            for i in cookies.indices {
-                let r = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name)
-                if cookies[i].tier != r.tier { cookies[i].tier = r.tier; changed = true }
-                if let p = r.plan, cookies[i].planName != p { cookies[i].planName = p; changed = true }
-                stateCache[cookies[i].id] = r.state
-            }
-            // Parse per-account metrics once, here, off-main.
             var cache: [UUID: AccountMetrics] = [:]
+            stateCache.reserveCapacity(cookies.count)
             cache.reserveCapacity(cookies.count)
-            for f in cookies { cache[f.id] = AccountMetrics.parse(name: f.name) }
+
+            for i in cookies.indices {
+                if !alreadyIndexed {
+                    // One-time heavy pass: backfill + authoritative domain-derived service.
+                    let meta = AppStore.extractCookieMetadata(fileName: cookies[i].name, path: cookies[i].path)
+                    if cookies[i].tier == .unknown || cookies[i].accountEmail == nil {
+                        cookies[i].tier = meta.tier; cookies[i].accountEmail = meta.email
+                        cookies[i].planName = meta.plan; changed = true
+                    }
+                    if let chosen = AppStore.deriveSite(from: cookies[i].cookies) ?? meta.service,
+                       cookies[i].serviceName != chosen {
+                        cookies[i].serviceName = chosen; changed = true
+                    }
+                    let r = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name)
+                    if cookies[i].tier != r.tier { cookies[i].tier = r.tier; changed = true }
+                    if let p = r.plan, cookies[i].planName != p { cookies[i].planName = p; changed = true }
+                    stateCache[cookies[i].id] = r.state
+                } else {
+                    // Fast path: trust persisted tier/service; only compute the transient state.
+                    stateCache[cookies[i].id] = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name).state
+                }
+                cache[cookies[i].id] = AccountMetrics.parse(name: cookies[i].name)
+            }
 
             let finalCookies = cookies, finalApis = apis, finalCache = cache, finalStates = stateCache, didChange = changed
             await MainActor.run {
@@ -522,6 +528,7 @@ public class AppStore: ObservableObject {
                 self.restoreExpandedState()
                 self.isIndexing = false
                 if didChange { self.save() }
+                UserDefaults.standard.set(Self.indexVersion, forKey: "cv_index_version")
             }
         }
     }
@@ -657,6 +664,25 @@ public class AppStore: ObservableObject {
         rebuildSiteIndex()
     }
 
+    /// Fast import finalize: derive/classify/parse ONLY the newly-added accounts
+    /// (instead of re-processing the entire library on every import).
+    public func indexNewCookies(_ newFiles: [CookieFile]) {
+        let ids = Set(newFiles.map { $0.id })
+        for i in cookieFiles.indices where ids.contains(cookieFiles[i].id) {
+            let meta = AppStore.extractCookieMetadata(fileName: cookieFiles[i].name, path: cookieFiles[i].path)
+            if let chosen = AppStore.deriveSite(from: cookieFiles[i].cookies) ?? meta.service {
+                cookieFiles[i].serviceName = chosen
+            }
+            let r = PlanClassifier.classify(service: cookieFiles[i].serviceName ?? "", name: cookieFiles[i].name)
+            cookieFiles[i].tier = r.tier
+            if let p = r.plan { cookieFiles[i].planName = p }
+            stateCache[cookieFiles[i].id] = r.state
+            metricsCache[cookieFiles[i].id] = AccountMetrics.parse(name: cookieFiles[i].name)
+        }
+        rebuildSiteIndex()
+        save()
+    }
+
     // Cached site grouping — rebuilt only when the cookie set changes, so the sidebar
     // and overviews don't re-scan tens of thousands of accounts on every render.
     private var siteGroupsCache: [String: [CookieFile]] = [:]
@@ -686,9 +712,12 @@ public class AppStore: ObservableObject {
 
     private var metricsCache: [UUID: AccountMetrics] = [:]
 
-    /// Parsed stats for a file (cached). Read-only; compute fallback for uncached.
+    /// Parsed stats for a file (lazily cached on first access).
     public func metrics(for file: CookieFile) -> AccountMetrics {
-        metricsCache[file.id] ?? AccountMetrics.parse(name: file.name)
+        if let c = metricsCache[file.id] { return c }
+        let m = AccountMetrics.parse(name: file.name)
+        metricsCache[file.id] = m
+        return m
     }
 
     public func buildMetricsCache() {
@@ -703,7 +732,10 @@ public class AppStore: ObservableObject {
     private var stateCache: [UUID: AccountState] = [:]
 
     public func state(for file: CookieFile) -> AccountState {
-        stateCache[file.id] ?? PlanClassifier.classify(service: file.serviceName ?? "", name: file.name).state
+        if let c = stateCache[file.id] { return c }
+        let s = PlanClassifier.classify(service: file.serviceName ?? "", name: file.name).state
+        stateCache[file.id] = s
+        return s
     }
 
     /// True when an account is worth keeping: premium plan, a usable state, and a live session.
@@ -768,6 +800,29 @@ public class AppStore: ObservableObject {
 
     public func apiKeyFilesInFolder(_ folder: String) -> [APIKeyFile] {
         apiKeyFiles.filter { $0.folderName == folder }
+    }
+
+    // MARK: - Global valid-keys aggregation ("filter for all valids")
+
+    /// Total valid keys across every file/type.
+    public var totalValidKeyCount: Int {
+        apiKeyFiles.reduce(0) { $0 + $1.keys.filter { $0.status == .valid }.count }
+    }
+
+    /// Total keys that have been checked at least once (not idle/checking).
+    public var totalCheckedKeyCount: Int {
+        apiKeyFiles.reduce(0) { $0 + $1.keys.filter { $0.status != .idle && $0.status != .checking }.count }
+    }
+
+    /// Every file that currently has at least one valid key, paired with its valid keys.
+    /// Sorted by valid-count descending so the richest types surface first.
+    public func filesWithValidKeys() -> [(file: APIKeyFile, valid: [APIKey])] {
+        apiKeyFiles.compactMap { f -> (APIKeyFile, [APIKey])? in
+            let valid = f.keys.filter { $0.status == .valid }
+            return valid.isEmpty ? nil : (f, valid)
+        }
+        .sorted { $0.1.count > $1.1.count }
+        .map { (file: $0.0, valid: $0.1) }
     }
 
     public func toggleFolderExpansion(key: String) {
@@ -927,7 +982,7 @@ public class AppStore: ObservableObject {
 
         if !newCookieFiles.isEmpty {
             cookieFiles.append(contentsOf: newCookieFiles)
-            enrichServiceNames()
+            indexNewCookies(newCookieFiles)
             selectedCookieFolder = folderName
             selectedCookieFile = newCookieFiles.first
             expandedFolders.insert("c_\(folderName)")
@@ -1033,7 +1088,7 @@ public class AppStore: ObservableObject {
 
         if !newCookieFiles.isEmpty {
             cookieFiles.append(contentsOf: newCookieFiles)
-            enrichServiceNames()
+            indexNewCookies(newCookieFiles)
             selectedCookieFolder = zipName
             selectedCookieFile = newCookieFiles.first
             expandedFolders.insert("c_\(zipName)")
@@ -1090,7 +1145,7 @@ public class AppStore: ObservableObject {
             serviceName: meta.service
         )
         cookieFiles.append(file)
-        enrichServiceNames()
+        indexNewCookies([file])
         selectedCookieFile = file
         selectedCookie = nil
         selectedCookieFolder = nil
@@ -1136,6 +1191,27 @@ public class AppStore: ObservableObject {
         }
         save()
         showToast("Deleted \(file.name)", type: .info)
+    }
+
+    /// Delete a single cookie entry (one row, e.g. a `sessionid`) from within an account.
+    public func deleteCookie(_ cookie: Cookie, from file: CookieFile) {
+        guard let idx = cookieFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        cookieFiles[idx].cookies.removeAll { $0.id == cookie.id }
+        // Keep the open detail selection in sync.
+        if selectedCookieFile?.id == file.id { selectedCookieFile = cookieFiles[idx] }
+        if selectedCookie?.id == cookie.id { selectedCookie = nil }
+        save()
+        showToast("Deleted cookie “\(cookie.name)”", type: .info)
+    }
+
+    /// Delete one specific cookie account, asking for confirmation first (guards a saved/starred one too).
+    public func deleteCookieFileConfirmed(_ file: CookieFile) {
+        let label = file.accountEmail ?? file.name
+        let extra = file.saved ? "\n\nNote: this account is starred (Saved)." : ""
+        guard confirmDestructive(title: "Delete this account?",
+                                 info: "Permanently removes “\(label)” (\(file.cookies.count) cookies).\(extra)",
+                                 confirmTitle: "Delete") else { return }
+        deleteCookieFile(file)
     }
 
     public func deleteCookieFolder(_ folderName: String) {
@@ -1205,6 +1281,34 @@ public class AppStore: ObservableObject {
         batchCheckProgress = 1
         save()
         showToast("Checked \(done) selected key\(done == 1 ? "" : "s")", type: .success)
+    }
+
+    /// QoL: check only keys that have never been checked (idle) in a file — much faster on re-runs.
+    @MainActor
+    public func checkUncheckedKeys(in file: APIKeyFile) async {
+        guard let idx = apiKeyFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        let ids = Set(apiKeyFiles[idx].keys.filter { $0.status == .idle }.map { $0.id })
+        guard !ids.isEmpty else { showToast("No unchecked keys — all keys already tested", type: .info); return }
+        await checkKeys(ids, in: file)
+    }
+
+    /// QoL: copy every valid key in a file to the clipboard.
+    public func copyValidKeys(in file: APIKeyFile) {
+        guard let f = apiKeyFiles.first(where: { $0.id == file.id }) else { return }
+        let valid = f.keys.filter { $0.status == .valid }
+        guard !valid.isEmpty else { showToast("No valid keys to copy", type: .warning); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(valid.map { $0.value }.joined(separator: "\n"), forType: .string)
+        showToast("Copied \(valid.count) valid key\(valid.count == 1 ? "" : "s")", type: .success)
+    }
+
+    /// QoL: copy every valid key across ALL files to the clipboard.
+    public func copyAllValidKeys() {
+        let all = apiKeyFiles.flatMap { $0.keys.filter { $0.status == .valid } }
+        guard !all.isEmpty else { showToast("No valid keys to copy", type: .warning); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(all.map { $0.value }.joined(separator: "\n"), forType: .string)
+        showToast("Copied \(all.count) valid key\(all.count == 1 ? "" : "s")", type: .success)
     }
 
     public func deleteAPIFolder(_ folderName: String) {

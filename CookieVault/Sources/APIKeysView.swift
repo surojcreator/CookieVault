@@ -9,7 +9,9 @@ struct APIKeysMainView: View {
 
     var body: some View {
         ZStack {
-            if let folder = store.selectedAPIFolder {
+            if store.showAllValidKeys {
+                AllValidKeysView()
+            } else if let folder = store.selectedAPIFolder {
                 FolderOverviewView(folderName: folder, tab: .apiKeys)
             } else if let file = store.selectedAPIFile {
                 // .id ties the view's identity to the selected file, so switching to a
@@ -96,7 +98,21 @@ struct APIFileDetailView: View {
         case .unchecked: k = k.filter { $0.status == .idle }
         case .error: k = k.filter { $0.status == .error }
         }
-        return k
+        // QoL: surface the useful keys first — valid, then limited, then the rest.
+        func rank(_ s: CheckStatus) -> Int {
+            switch s {
+            case .valid: return 0
+            case .quotaExceeded, .rateLimited, .permissionDenied: return 1
+            case .checking: return 2
+            case .idle: return 3
+            case .error: return 4
+            case .invalid: return 5
+            }
+        }
+        return k.enumerated().sorted { a, b in
+            let ra = rank(a.element.status), rb = rank(b.element.status)
+            return ra == rb ? a.offset < b.offset : ra < rb
+        }.map { $0.element }
     }
 
     var body: some View {
@@ -106,6 +122,8 @@ struct APIFileDetailView: View {
             filterBar
             Rectangle().fill(Theme.border).frame(height: 1)
             statsBar
+            Rectangle().fill(Theme.border).frame(height: 1)
+            revealsBar
             Rectangle().fill(Theme.border).frame(height: 1)
             if vm.selectMode {
                 selectionBar
@@ -121,16 +139,19 @@ struct APIFileDetailView: View {
         }
     }
 
+    private var providerInfo: APIKeyChecker.ProviderInfo { APIKeyChecker.providerInfo(service: vm.file.service) }
+
     private var topBar: some View {
         HStack(spacing: 14) {
             IconTile(symbol: vm.file.icon, tint: Theme.gold, size: 44)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(vm.file.displayName).font(.system(size: 17, weight: .bold)).foregroundColor(Theme.textPri)
+                    Pill(text: providerInfo.category, tint: Theme.accent2)
                     if let folder = vm.file.folderName { Pill(text: folder, systemImage: "folder.fill", tint: Theme.textSec) }
                 }
-                Text("\(currentFile.keys.count) API keys · \(currentFile.service)")
-                    .font(.system(size: 12)).foregroundColor(Theme.textTer)
+                Text("\(currentFile.keys.count) keys · \(providerInfo.blurb)")
+                    .font(.system(size: 12)).foregroundColor(Theme.textTer).lineLimit(1)
             }
             Spacer()
             Button {
@@ -227,6 +248,24 @@ struct APIFileDetailView: View {
     }
     private var statDivider: some View { Rectangle().fill(Theme.border).frame(width: 1, height: 28) }
 
+    // Per-type descriptor: what a valid check of this provider surfaces.
+    private var revealsBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles").font(.system(size: 9)).foregroundColor(Theme.accent2)
+            Text("Reveals:").font(.system(size: 10, weight: .semibold)).foregroundColor(Theme.textTer)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(providerInfo.reveals, id: \.self) { r in
+                        Text(r).font(.system(size: 9.5, weight: .medium)).foregroundColor(Theme.accent2)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.accent.opacity(0.10)))
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 7).background(Theme.bg1)
+    }
+
     private var keysList: some View {
         ScrollView {
             LazyVStack(spacing: 6) {
@@ -265,9 +304,19 @@ struct APIFileDetailView: View {
             }
             .buttonStyle(.plain).disabled(store.isBatchChecking)
 
+            Button { Task { await store.checkUncheckedKeys(in: vm.file) } } label: {
+                GhostButton(title: "Check New (\(count(.unchecked)))", systemImage: "sparkle.magnifyingglass", tint: Theme.gold)
+            }
+            .buttonStyle(.plain).disabled(store.isBatchChecking || count(.unchecked) == 0)
+            .opacity(count(.unchecked) == 0 ? 0.4 : 1)
+
+            Button { store.copyValidKeys(in: vm.file) } label: {
+                GhostButton(title: "Copy Valid", systemImage: "doc.on.doc", tint: Theme.textSec)
+            }.buttonStyle(.plain).disabled(count(.valid) == 0).opacity(count(.valid) == 0 ? 0.4 : 1)
+
             Button { exportValid() } label: {
                 GhostButton(title: "Export Valid (\(count(.valid)))", systemImage: "square.and.arrow.up.fill", tint: Theme.green)
-            }.buttonStyle(.plain)
+            }.buttonStyle(.plain).disabled(count(.valid) == 0).opacity(count(.valid) == 0 ? 0.4 : 1)
 
             Spacer()
 
@@ -504,6 +553,167 @@ struct APIKeyRow: View {
         case .error: return Theme.red.opacity(0.2)
         default: return Theme.border
         }
+    }
+}
+
+// MARK: - All Valid Keys (global "filter for all valids" view)
+
+final class AllValidVM: ObservableObject {
+    @Published var search = ""
+    @Published var collapsed: Set<UUID> = []
+}
+
+struct AllValidKeysView: View {
+    @EnvironmentObject var store: AppStore
+    @StateObject private var vm = AllValidVM()
+
+    private var groups: [(file: APIKeyFile, valid: [APIKey])] {
+        let q = vm.search.lowercased()
+        return store.filesWithValidKeys().compactMap { g in
+            guard !q.isEmpty else { return g }
+            // match against provider name/service OR individual key values
+            if g.file.displayName.lowercased().contains(q) || g.file.service.lowercased().contains(q) {
+                return g
+            }
+            let keys = g.valid.filter { $0.value.lowercased().contains(q) || ($0.details?.accountName?.lowercased().contains(q) ?? false) }
+            return keys.isEmpty ? nil : (file: g.file, valid: keys)
+        }
+    }
+
+    private var shownCount: Int { groups.reduce(0) { $0 + $1.valid.count } }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            topBar
+            Rectangle().fill(Theme.border).frame(height: 1)
+            filterBar
+            Rectangle().fill(Theme.border).frame(height: 1)
+            content
+        }
+        .background(Theme.bg0)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11).fill(Theme.green.opacity(0.16)).frame(width: 44, height: 44)
+                Image(systemName: "checkmark.seal.fill").font(.system(size: 20, weight: .bold)).foregroundColor(Theme.green)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("All Valid Keys").font(.system(size: 17, weight: .bold)).foregroundColor(Theme.textPri)
+                Text("\(store.totalValidKeyCount) valid across \(store.filesWithValidKeys().count) types · \(store.totalCheckedKeyCount) checked total")
+                    .font(.system(size: 12)).foregroundColor(Theme.textTer)
+            }
+            Spacer()
+            Button { store.copyAllValidKeys() } label: {
+                GhostButton(title: "Copy All", systemImage: "doc.on.doc", tint: Theme.textSec)
+            }.buttonStyle(.plain)
+            Button { store.exportAllValidKeys() } label: {
+                FilledButton(title: "Export All Valid", systemImage: "square.and.arrow.up.fill",
+                             gradient: LinearGradient(colors: [Theme.green, Theme.green.opacity(0.7)], startPoint: .top, endPoint: .bottom), glow: Theme.green)
+            }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 16).background(Theme.bg1)
+    }
+
+    private var filterBar: some View {
+        HStack(spacing: 10) {
+            CVSearchBar(text: Binding(get: { vm.search }, set: { vm.search = $0 }), placeholder: "Filter by provider or key…").frame(maxWidth: 340)
+            Spacer()
+            if !groups.isEmpty {
+                Text("\(shownCount) shown").font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.textTer)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10).background(Theme.bg1)
+    }
+
+    @ViewBuilder private var content: some View {
+        if store.totalValidKeyCount == 0 {
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle().fill(Theme.green.opacity(0.10)).frame(width: 84, height: 84)
+                    Image(systemName: "checkmark.seal").font(.system(size: 32)).foregroundColor(Theme.green)
+                }
+                Text("No valid keys yet").font(.system(size: 17, weight: .bold)).foregroundColor(Theme.textPri)
+                Text("Run “Check All Keys” on your key files — every valid key across all provider types collects here.")
+                    .font(.system(size: 12.5)).foregroundColor(Theme.textSec)
+                    .multilineTextAlignment(.center).frame(maxWidth: 380).lineSpacing(2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.bg0)
+        } else if groups.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").font(.system(size: 24)).foregroundColor(Theme.textTer)
+                Text("No valid keys match “\(vm.search)”").font(.system(size: 13)).foregroundColor(Theme.textSec)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(groups, id: \.file.id) { g in
+                        groupSection(g.file, g.valid)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 12)
+            }
+            .background(Theme.bg0)
+        }
+    }
+
+    private func groupSection(_ file: APIKeyFile, _ keys: [APIKey]) -> some View {
+        let info = APIKeyChecker.providerInfo(service: file.service)
+        let isCollapsed = vm.collapsed.contains(file.id)
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                if isCollapsed { vm.collapsed.remove(file.id) } else { vm.collapsed.insert(file.id) }
+            } label: {
+                HStack(spacing: 10) {
+                    IconTile(symbol: file.icon, tint: Theme.green, size: 30)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(file.displayName).font(.system(size: 13.5, weight: .bold)).foregroundColor(Theme.textPri)
+                            Pill(text: info.category, tint: Theme.accent2)
+                            if let folder = file.folderName { Pill(text: folder, systemImage: "folder.fill", tint: Theme.textTer) }
+                        }
+                        Text(info.blurb).font(.system(size: 10.5)).foregroundColor(Theme.textTer).lineLimit(1)
+                    }
+                    Spacer()
+                    Text("\(keys.count) valid")
+                        .font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(Theme.green)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.green.opacity(0.14)))
+                    Button { store.copyValidKeys(in: file) } label: {
+                        Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundColor(Theme.textSec)
+                    }.buttonStyle(.plain).help("Copy this type's valid keys")
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 10, weight: .bold)).foregroundColor(Theme.textTer)
+                }
+            }.buttonStyle(.plain)
+
+            if !isCollapsed {
+                // What a valid key of this type reveals — the per-type "detailed view".
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(info.reveals, id: \.self) { r in
+                            HStack(spacing: 3) {
+                                Image(systemName: "sparkle").font(.system(size: 7))
+                                Text(r).font(.system(size: 9, weight: .medium))
+                            }
+                            .foregroundColor(Theme.accent2).padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.accent.opacity(0.10)))
+                        }
+                    }
+                }
+                VStack(spacing: 6) {
+                    ForEach(keys) { key in
+                        APIKeyRow(key: key, service: file.service,
+                                  onCheck: { Task { await store.checkKey(key, in: file) } },
+                                  onInspect: { store.selectedAPIFile = file; store.inspectedKey = key })
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rMd).stroke(Theme.green.opacity(0.18), lineWidth: 1))
     }
 }
 

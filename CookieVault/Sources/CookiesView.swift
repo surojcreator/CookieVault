@@ -82,9 +82,14 @@ struct CookieFileDetailView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(filtered()) { cookie in
-                            CookieRow(cookie: cookie, isSelected: store.selectedCookie?.id == cookie.id) {
-                                store.selectedCookie = cookie
-                            }
+                            CookieRow(cookie: cookie, isSelected: store.selectedCookie?.id == cookie.id,
+                                      action: { store.selectedCookie = cookie },
+                                      onCopyValue: {
+                                          NSPasteboard.general.clearContents()
+                                          NSPasteboard.general.setString(cookie.value, forType: .string)
+                                          store.showToast("Copied cookie value", type: .success)
+                                      },
+                                      onDelete: { store.deleteCookie(cookie, from: file) })
                             Rectangle().fill(Theme.border.opacity(0.5)).frame(height: 1)
                         }
                     }
@@ -127,7 +132,7 @@ struct CookieFileDetailView: View {
                 }.buttonStyle(.plain)
                 Button { copyNetscape() } label: { GhostButton(title: "Copy Netscape", systemImage: "doc.on.doc") }.buttonStyle(.plain)
                 Button { exportCookiesJSON() } label: { IconButton(symbol: "square.and.arrow.up") }.buttonStyle(.plain)
-                Button { store.deleteCookieFile(file) } label: { IconButton(symbol: "trash", tint: Theme.red) }.buttonStyle(.plain)
+                Button { store.deleteCookieFileConfirmed(file) } label: { IconButton(symbol: "trash", tint: Theme.red) }.buttonStyle(.plain).help("Delete this account")
             }
 
             HStack(spacing: 16) {
@@ -257,6 +262,8 @@ struct CookieRow: View {
     let cookie: Cookie
     let isSelected: Bool
     let action: () -> Void
+    var onCopyValue: () -> Void = {}
+    var onDelete: () -> Void = {}
     @StateObject private var hover = RowHover()
 
     var body: some View {
@@ -291,6 +298,11 @@ struct CookieRow: View {
         .buttonStyle(.plain)
         .onHover { hover.on = $0 }
         .animation(.easeOut(duration: 0.1), value: hover.on)
+        .contextMenu {
+            Button { onCopyValue() } label: { Label("Copy Value", systemImage: "doc.on.doc") }
+            Divider()
+            Button(role: .destructive) { onDelete() } label: { Label("Delete Cookie", systemImage: "trash") }
+        }
     }
 
     var maskedValue: String {

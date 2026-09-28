@@ -74,10 +74,18 @@ public final class ChromiumLauncher {
         return base
     }
     private var chromiumDir: URL { supportDir.appendingPathComponent("chromium", isDirectory: true) }
-    private var profilesDir: URL {
-        let d = supportDir.appendingPathComponent("profiles", isDirectory: true)
+    /// Ephemeral per-launch browser profiles (deleted when the browser closes).
+    private var sessionsDir: URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("CookieVaultSessions", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
+    }
+
+    /// Deletes leftover session profiles (e.g. if a previous cleanup didn't run).
+    static func sweepOldSessions() {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("CookieVaultSessions", isDirectory: true)
+        guard let items = try? FileManager.default.contentsOfDirectory(at: d, includingPropertiesForKeys: nil) else { return }
+        for item in items { try? FileManager.default.removeItem(at: item) }
     }
 
     // MARK: - Public launch entry point
@@ -94,7 +102,9 @@ public final class ChromiumLauncher {
 
         let port = Self.freePort()
         let safeKey = profileKey.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "_", options: .regularExpression)
-        let profile = profilesDir.appendingPathComponent(safeKey.isEmpty ? "default" : safeKey, isDirectory: true)
+        // Ephemeral, unique profile fully isolated from the user's main browser — its
+        // cookies live only for this session and are deleted when the browser closes.
+        let profile = sessionsDir.appendingPathComponent("cv_\(safeKey.isEmpty ? "s" : safeKey)_\(UUID().uuidString)", isDirectory: true)
 
         progress("Starting browser…")
         let task = Process()
@@ -107,9 +117,16 @@ public final class ChromiumLauncher {
             "--no-default-browser-check",
             "--no-service-autorun",
             "--password-store=basic",
+            "--disable-sync",
             "about:blank",
         ]
         try task.run()
+
+        // When this isolated browser is closed, wipe its profile (and the injected cookies).
+        Task.detached(priority: .background) {
+            task.waitUntilExit()
+            try? FileManager.default.removeItem(at: profile)
+        }
 
         // Wait for the DevTools endpoint to come up.
         progress("Connecting to DevTools…")

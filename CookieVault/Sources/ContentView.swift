@@ -587,6 +587,18 @@ struct APIKeysSidebarList: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 5) {
+                if !store.apiKeyFiles.isEmpty {
+                    APIValidSmartRow(
+                        count: store.totalValidKeyCount,
+                        isSelected: store.showAllValidKeys
+                    ) {
+                        store.showAllValidKeys = true
+                        store.selectedAPIFile = nil
+                        store.selectedAPIFolder = nil
+                    }
+                    .padding(.bottom, 4)
+                }
+
                 if !store.apiKeyFolders.isEmpty {
                     SectionHeader(title: "Folders") { store.chooseFolder(tab: .apiKeys) }
                     ForEach(store.apiKeyFolders, id: \.self) { folder in
@@ -600,7 +612,7 @@ struct APIKeysSidebarList: View {
                                 isSelected: store.selectedAPIFolder == folder,
                                 color: Theme.gold,
                                 onToggle: { store.toggleFolderExpansion(key: "a_\(folder)") },
-                                onSelect: { store.selectedAPIFolder = folder; store.selectedAPIFile = nil },
+                                onSelect: { store.showAllValidKeys = false; store.selectedAPIFolder = folder; store.selectedAPIFile = nil },
                                 onDelete: { store.deleteAPIFolder(folder) }
                             )
                             if isExpanded {
@@ -610,7 +622,7 @@ struct APIKeysSidebarList: View {
                                                        icon: file.icon, color: Theme.gold,
                                                        isSelected: store.selectedAPIFile?.id == file.id && store.selectedAPIFolder == nil,
                                                        isIndented: true) {
-                                            store.selectedAPIFolder = nil; store.selectedAPIFile = file
+                                            store.showAllValidKeys = false; store.selectedAPIFolder = nil; store.selectedAPIFile = file
                                         }
                                     }
                                 }
@@ -627,7 +639,7 @@ struct APIKeysSidebarList: View {
                                        icon: file.icon, color: Theme.gold,
                                        isSelected: store.selectedAPIFile?.id == file.id && store.selectedAPIFolder == nil,
                                        isIndented: false) {
-                            store.selectedAPIFolder = nil; store.selectedAPIFile = file
+                            store.showAllValidKeys = false; store.selectedAPIFolder = nil; store.selectedAPIFile = file
                         }
                     }
                 }
@@ -644,6 +656,46 @@ struct APIKeysSidebarList: View {
             }
             .padding(.horizontal, 10).padding(.top, 12)
         }
+    }
+}
+
+// MARK: - "All Valid Keys" smart row
+
+struct APIValidSmartRow: View {
+    let count: Int
+    let isSelected: Bool
+    let action: () -> Void
+    @StateObject private var hover = HoverState()
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Theme.green.opacity(isSelected ? 0.28 : 0.16))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 13, weight: .bold)).foregroundColor(Theme.green)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("All Valid Keys").font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(isSelected ? Theme.textPri : Theme.textSec)
+                    Text("across every type").font(.system(size: 10)).foregroundColor(Theme.textTer)
+                }
+                Spacer()
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(Theme.green)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Capsule().fill(Theme.green.opacity(0.14)))
+            }
+            .padding(.horizontal, 9).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: Theme.rSm)
+                .fill(isSelected ? Theme.green.opacity(0.12) : (hover.on ? Theme.surfaceHi : .clear)))
+            .overlay(RoundedRectangle(cornerRadius: Theme.rSm)
+                .stroke(isSelected ? Theme.green.opacity(0.45) : Theme.border.opacity(hover.on ? 1 : 0), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover.on = $0 }
     }
 }
 

@@ -8,7 +8,8 @@ A macOS (SwiftUI) desktop app for inspecting cookie session files and API-key fi
 - **Launch in an isolated browser** — opens a session in a dedicated Chromium profile and injects cookies over the **Chrome DevTools Protocol** (works on modern Chrome/Chromium). Offers to download an open-source Chromium build if none is installed.
 - **Adaptive filters** — followers, views, CC, subs, country, year, account state, session validity, plan, and more/less-than numeric ranges — shown only where relevant to each site type.
 - **Saved collection** — star the good accounts (premium + usable + live session).
-- **API-key checker** — validates keys across 100+ providers concurrently and surfaces account details (plan, balance, scopes, models, latency) inline. Multi-select keys for bulk copy/export/delete/check.
+- **API-key checker** — validates keys across 100+ providers concurrently and surfaces account details (plan, balance, scopes, models, latency) inline. Each provider type shows a category + "what this check reveals" descriptor. Multi-select keys for bulk copy/export/delete/check, plus QoL actions (Copy Valid, Check-New-only, valid-first sorting).
+- **All Valid Keys view** — one place that collects every valid key across all provider types, grouped by type, with copy-all / export-all.
 
 ## Build & run
 

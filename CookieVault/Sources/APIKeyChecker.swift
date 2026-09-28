@@ -29,6 +29,67 @@ public enum APIKeyChecker {
         }
     }
 
+    // MARK: - Per-type provider descriptor
+    // Powers the "detailed view for every api key type": a category, a one-line blurb,
+    // and the concrete facts a valid check surfaces for that provider family.
+    public struct ProviderInfo {
+        public var category: String     // e.g. "AI / LLM", "Payments", "Messaging"
+        public var blurb: String        // what this key unlocks
+        public var reveals: [String]    // facts the checker extracts on a valid key
+    }
+
+    public static func providerInfo(service: String) -> ProviderInfo {
+        let s = service.lowercased()
+        func mk(_ c: String, _ b: String, _ r: [String]) -> ProviderInfo { ProviderInfo(category: c, blurb: b, reveals: r) }
+
+        switch s {
+        case "openai", "sk_all", "openai_org", "openai_asst":
+            return mk("AI / LLM", "OpenAI platform key — chat, embeddings, images, assistants.", ["Accessible models", "GPT-4 / reasoning access", "Quota / billing state", "Latency"])
+        case "anthropic":
+            return mk("AI / LLM", "Anthropic Claude API key.", ["Accessible Claude models", "API access tier", "Latency"])
+        case "google_ai":
+            return mk("AI / LLM", "Google Gemini / Generative AI key.", ["Gemini models", "HTTP status", "Latency"])
+        case "openrouter":
+            return mk("AI / LLM", "OpenRouter aggregator key — routes to many models.", ["Credit balance", "Rate limit", "Free vs paid tier"])
+        case "groq": return mk("AI / LLM", "Groq LPU inference key.", ["Accessible models", "Latency"])
+        case "deepseek": return mk("AI / LLM", "DeepSeek inference key.", ["Balance", "Models"])
+        case "mistral": return mk("AI / LLM", "Mistral AI key.", ["Models", "Subscription"])
+        case "huggingface": return mk("AI / LLM", "Hugging Face access token.", ["Username", "Token role / scopes", "Orgs"])
+        case "cohere", "together", "fireworks", "cerebras", "xai", "perplexity", "replicate", "voyage", "anyscale", "aimlapi", "fal", "runpod", "hyperbrowser", "browserbase":
+            return mk("AI / LLM", "AI inference / tooling key.", ["Account", "Models / quota", "Latency"])
+        case "elevenlabs": return mk("AI / Voice", "ElevenLabs TTS key.", ["Subscription tier", "Character quota", "Voices"])
+        case "deepl": return mk("AI / Translate", "DeepL translation key.", ["Plan (Free/Pro)", "Character usage"])
+        case "stripe": return mk("Payments", "Stripe secret/restricted key — LIVE money movement.", ["Business name", "Country / currency", "Charges & payouts enabled", "Email"])
+        case "razorpay", "square", "checkout", "flutterwave": return mk("Payments", "Payment-processor key.", ["Account", "Currency", "Mode (live/test)"])
+        case "shopify": return mk("Commerce", "Shopify admin/API token.", ["Shop", "Scopes", "Plan"])
+        case "github": return mk("Dev / Source", "GitHub personal-access token.", ["Login & name", "Plan", "Private repos", "Followers", "2FA", "Scopes"])
+        case "gitlab", "bitbucket": return mk("Dev / Source", "Git host token.", ["User", "Scopes"])
+        case "vercel", "netlify", "render", "flyio", "heroku", "digitalocean", "scaleway": return mk("Cloud / Hosting", "Hosting/cloud API token.", ["Account", "Teams / projects", "Plan"])
+        case "aws_access_key", "alibaba_cloud", "tencent_cloud": return mk("Cloud", "Cloud provider access key.", ["Identity", "Region", "Permissions"])
+        case "datadog", "newrelic", "grafana", "sentry", "sentry_dsn", "sonarqube", "pagerduty", "launchdarkly": return mk("Observability", "Monitoring / observability key.", ["Org", "Scopes", "Status"])
+        case "telegram_bot", "1635646211_@pkbtv_@sackion_@sakione_bot": return mk("Messaging / Bots", "Telegram bot token.", ["Bot name & @username", "Bot ID", "Capabilities"])
+        case "discord_bot": return mk("Messaging / Bots", "Discord bot token.", ["Bot user & tag", "Guild count", "Flags"])
+        case "discord_user", "all_discord_tokens", "valid_discord_tokens": return mk("Messaging / Accounts", "Discord USER token — full account access.", ["Username & tag", "Email", "Phone", "Nitro", "MFA", "Verified"])
+        case "discord_webhook", "slack_webhook", "teams_webhook": return mk("Messaging / Webhooks", "Incoming webhook URL.", ["Channel / target", "Reachable"])
+        case "slack": return mk("Messaging", "Slack token.", ["Team", "User", "Scopes"])
+        case "twilio": return mk("Comms", "Twilio account credential.", ["Account name", "Status", "Balance", "Type (trial/full)"])
+        case "sendgrid": return mk("Email", "SendGrid API key.", ["Scopes", "Reputation", "Send access"])
+        case "mailchimp", "mailgun", "postmark", "brevo", "resend", "klaviyo": return mk("Email", "Transactional/marketing email key.", ["Account", "Domain / sending status", "Plan"])
+        case "intercom": return mk("Support / CRM", "Intercom access token.", ["App / workspace", "Admin", "Scopes"])
+        case "notion": return mk("Productivity", "Notion integration token.", ["Bot / workspace", "Capabilities"])
+        case "airtable": return mk("Productivity", "Airtable token.", ["User", "Bases / scopes"])
+        case "figma": return mk("Design", "Figma personal token.", ["User", "Email"])
+        case "clickup", "trello", "typeform", "dropbox": return mk("Productivity", "SaaS API token.", ["Account", "Scopes"])
+        case "mongodb_uri", "postgres_uri", "mysql_uri", "redis_uri", "amqp_uri", "elasticsearch_uri": return mk("Database", "Database connection string — direct data access.", ["Host reachable", "Auth accepted", "Engine"])
+        case "neon", "supabase", "pinecone", "airtable_meta": return mk("Database / Backend", "Managed DB / vector store key.", ["Project", "Region", "Plan"])
+        case "mapbox": return mk("Maps / Geo", "Mapbox token.", ["Account", "Scopes"])
+        case "spotify": return mk("Media", "Spotify API credential.", ["Token type", "Scopes"])
+        case "twilio_verify": return mk("Comms", "Twilio verify key.", ["Account", "Status"])
+        default:
+            return mk("API Key", "Third-party API credential.", ["Validity", "HTTP status", "Latency", "Any returned account detail"])
+        }
+    }
+
     // MARK: - Main Check Dispatcher
     public static func check(key: String, service: String, endpoint: String?) async -> CheckResult {
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1307,6 +1368,11 @@ public enum APIKeyChecker {
 
                     details.accountName = firstName.isEmpty ? "@\(username)" : "@\(username) (\(firstName))"
                     details.planOrTier = "Telegram Bot (ID: \(botId))"
+                    var caps: [String] = []
+                    if (res["can_join_groups"] as? Bool) == true { caps.append("join groups") }
+                    if (res["can_read_all_group_messages"] as? Bool) == true { caps.append("read all msgs") }
+                    if (res["supports_inline_queries"] as? Bool) == true { caps.append("inline queries") }
+                    if !caps.isEmpty { details.permissions = caps }
                 }
 
                 return CheckResult(status: .valid, snippet: "Valid Bot: \(details.accountName ?? "Bot")", details: details)
@@ -1341,11 +1407,30 @@ public enum APIKeyChecker {
 
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let username = json["username"] as? String ?? "Discord Bot"
+                    let disc = json["discriminator"] as? String ?? "0"
                     let id = json["id"] as? String ?? ""
-                    details.accountName = username
+                    let tag = (disc == "0" || disc.isEmpty) ? username : "\(username)#\(disc)"
+                    details.accountName = tag
                     details.planOrTier = "Discord Bot (ID: \(id))"
+                    var flags: [String] = []
+                    if (json["verified"] as? Bool) == true { flags.append("verified") }
+                    let pf = (json["public_flags"] as? Int) ?? (json["flags"] as? Int) ?? 0
+                    if pf & (1 << 16) != 0 { flags.append("verified-bot") }        // VERIFIED_BOT
+                    if pf & (1 << 19) != 0 { flags.append("active-developer") }     // ACTIVE_DEVELOPER
+                    if !flags.isEmpty { details.permissions = flags }
                 }
-                return CheckResult(status: .valid, snippet: "Valid: \(details.accountName ?? "Discord Bot")", details: details)
+                // Guild reach (best-effort) — how many servers the bot is in.
+                if let gUrl = URL(string: "https://discord.com/api/v10/users/@me/guilds") {
+                    var gReq = URLRequest(url: gUrl, timeoutInterval: 5)
+                    gReq.setValue("Bot \(key)", forHTTPHeaderField: "Authorization")
+                    if let (gd, gResp) = try? await APIKeyChecker.session.data(for: gReq),
+                       (gResp as? HTTPURLResponse)?.statusCode == 200,
+                       let guilds = try? JSONSerialization.jsonObject(with: gd) as? [[String: Any]] {
+                        details.balanceOrQuota = "In \(guilds.count) server\(guilds.count == 1 ? "" : "s")"
+                    }
+                }
+                let extra = details.balanceOrQuota.map { " · \($0)" } ?? ""
+                return CheckResult(status: .valid, snippet: "Valid: \(details.accountName ?? "Discord Bot")\(extra)", details: details)
             } else if code == 401 {
                 return CheckResult(status: .invalid, snippet: "Invalid Discord bot token")
             } else {
@@ -1446,17 +1531,64 @@ public enum APIKeyChecker {
         return CheckResult(status: .invalid, snippet: "Invalid Teams Webhook format")
     }
 
-    // 53. Twilio
+    // 53. Twilio — live check when the token is provided as "SID:token".
     private static func checkTwilio(key: String) async -> CheckResult {
         let parts = key.components(separatedBy: ":")
         let sid = parts.first ?? key
         guard sid.hasPrefix("AC") || sid.hasPrefix("SK") else {
             return CheckResult(status: .invalid, snippet: "Invalid Twilio Account SID format")
         }
-        var details = KeyDetails()
-        details.accountName = sid
-        details.planOrTier = "Twilio Account"
-        return CheckResult(status: .valid, snippet: "Valid Twilio Account SID (\(sid.prefix(8))...)", details: details)
+        // Without the auth token we can only validate the SID shape.
+        guard parts.count >= 2, !parts[1].isEmpty else {
+            var details = KeyDetails()
+            details.accountName = sid
+            details.planOrTier = "Twilio SID (token not supplied — format only)"
+            return CheckResult(status: .valid, snippet: "Valid Twilio SID format (\(sid.prefix(10))…) — provide SID:token for a live check", details: details)
+        }
+        let token = parts[1]
+        // The auth SID for Basic auth must be an Account SID (AC…); SK keys authenticate under their AC.
+        guard let url = URL(string: "https://api.twilio.com/2010-04-01/Accounts/\(sid).json") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        let auth = Data("\(sid):\(token)".utf8).base64EncodedString()
+        req.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var details = KeyDetails()
+                details.latencyMs = latency; details.httpCode = 200
+                details.accountName = sid
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let name = json["friendly_name"] as? String { details.accountName = name }
+                    let status = (json["status"] as? String ?? "").capitalized
+                    let type = (json["type"] as? String ?? "").capitalized  // Trial / Full
+                    details.planOrTier = [type, status].filter { !$0.isEmpty }.joined(separator: " · ")
+                }
+                // Fetch balance (best-effort).
+                if let balUrl = URL(string: "https://api.twilio.com/2010-04-01/Accounts/\(sid)/Balance.json") {
+                    var balReq = URLRequest(url: balUrl, timeoutInterval: 5)
+                    balReq.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
+                    if let (bd, _) = try? await APIKeyChecker.session.data(for: balReq),
+                       let bj = try? JSONSerialization.jsonObject(with: bd) as? [String: Any],
+                       let bal = bj["balance"] as? String {
+                        let cur = bj["currency"] as? String ?? "USD"
+                        details.balanceOrQuota = "Balance: \(bal) \(cur)"
+                    }
+                }
+                let extra = details.balanceOrQuota.map { " · \($0)" } ?? ""
+                return CheckResult(status: .valid, snippet: "Valid Twilio (\(details.planOrTier ?? "active"))\(extra)", details: details)
+            } else if code == 401 {
+                return CheckResult(status: .invalid, snippet: "Invalid Twilio SID/token pair (HTTP 401)")
+            } else {
+                return CheckResult(status: .error, snippet: "HTTP \(code)")
+            }
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
     }
 
     // 54. SendGrid
@@ -2046,14 +2178,60 @@ public enum APIKeyChecker {
                 details.latencyMs = latency
                 details.httpCode = code
                 details.rawSnippet = snippet
-                return CheckResult(status: .valid, snippet: "Valid \(provider) Key (HTTP \(code))", details: details)
+                // Pull whatever account facts the provider returned (name/email/plan/status).
+                enrichCommonFields(&details, from: data)
+                let extra = details.accountName.map { " · \($0)" } ?? (details.email.map { " · \($0)" } ?? "")
+                return CheckResult(status: .valid, snippet: "Valid \(provider) Key (HTTP \(code))\(extra)", details: details)
             } else if code == 401 || code == 403 {
                 return CheckResult(status: .invalid, snippet: "Invalid \(provider) Key (HTTP \(code))")
+            } else if code == 429 {
+                return CheckResult(status: .rateLimited, snippet: "\(provider) rate limited (HTTP 429)")
             } else {
                 return CheckResult(status: .error, snippet: "HTTP \(code)")
             }
         } catch {
             return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
+    }
+
+    /// Best-effort extractor: pulls common account fields (name, email, plan, status, balance)
+    /// out of a JSON body regardless of the provider's exact schema. Enriches many providers at once.
+    private static func enrichCommonFields(_ details: inout KeyDetails, from data: Data) {
+        // Unwrap common envelopes: {data:{…}}, {account:{…}}, [{…}], {results:[{…}]}.
+        func firstObject(_ any: Any?) -> [String: Any]? {
+            if let d = any as? [String: Any] { return d }
+            if let arr = any as? [[String: Any]] { return arr.first }
+            return nil
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return }
+        var obj = firstObject(root) ?? [:]
+        for wrap in ["data", "account", "user", "result", "results", "team", "profile", "app"] {
+            if details.accountName == nil, let inner = firstObject(obj[wrap]) {
+                // Prefer the inner object when the outer had no obvious name.
+                if inner["name"] != nil || inner["email"] != nil || inner["username"] != nil || inner["login"] != nil {
+                    obj = inner; break
+                }
+            }
+        }
+        func str(_ keys: [String]) -> String? {
+            for k in keys { if let v = obj[k] as? String, !v.isEmpty { return v } }
+            return nil
+        }
+        if details.accountName == nil {
+            details.accountName = str(["name", "username", "login", "display_name", "full_name", "company_name", "first_name", "nickname", "handle"])
+        }
+        if details.email == nil { details.email = str(["email", "email_address", "contact_email"]) }
+        if details.planOrTier == nil {
+            details.planOrTier = str(["plan", "plan_name", "tier", "type", "subscription", "account_type", "role"])
+        }
+        if details.balanceOrQuota == nil {
+            if let b = str(["balance", "credits", "credit", "quota"]) { details.balanceOrQuota = b }
+            else if let n = obj["balance"] as? NSNumber { details.balanceOrQuota = "Balance: \(n)" }
+            else if let n = obj["credits"] as? NSNumber { details.balanceOrQuota = "Credits: \(n)" }
+        }
+        // Surface an account status flag if present (active/suspended/etc.).
+        if details.planOrTier == nil, let status = str(["status", "state"]) {
+            details.planOrTier = status.capitalized
         }
     }
 

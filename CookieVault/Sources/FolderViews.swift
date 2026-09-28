@@ -611,12 +611,26 @@ struct CookieAccountCard: View {
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: 7).fill(Theme.accent.opacity(0.12)))
             }.buttonStyle(.plain)
+            Button { store.deleteCookieFileConfirmed(file) } label: {
+                IconButton(symbol: "trash", tint: Theme.red)
+            }.buttonStyle(.plain).help("Delete this account")
         }
         .cvCard(padding: 14, radius: Theme.rMd, fill: Theme.surface,
                 stroke: hover.on ? (isPremium ? Theme.gold.opacity(0.5) : Theme.accent.opacity(0.5))
                                  : (isPremium ? Theme.gold.opacity(0.15) : Theme.border))
         .onHover { hover.on = $0 }
         .animation(.easeOut(duration: 0.12), value: hover.on)
+        .contextMenu {
+            Button { onOpenDetails() } label: { Label("Open Details", systemImage: "chevron.right") }
+            Button { store.toggleSaved(file) } label: {
+                Label(file.saved ? "Remove from Saved" : "Save", systemImage: file.saved ? "star.slash" : "star")
+            }
+            Button { copyNetscape() } label: { Label("Copy Netscape", systemImage: "doc.on.doc") }
+            Divider()
+            Button(role: .destructive) { store.deleteCookieFileConfirmed(file) } label: {
+                Label("Delete Account", systemImage: "trash")
+            }
+        }
     }
 
     // Per-account stat strip (followers / views / cc / country / verified …)
