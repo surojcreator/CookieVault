@@ -622,6 +622,19 @@ struct CookieAccountCard: View {
         .animation(.easeOut(duration: 0.12), value: hover.on)
         .contextMenu {
             Button { onOpenDetails() } label: { Label("Open Details", systemImage: "chevron.right") }
+            if let firstCookie = file.cookies.first {
+                Button { store.openInBrowser(cookie: firstCookie, file: file) } label: {
+                    Label("Launch Session", systemImage: "safari.fill")
+                }
+                if file.lastOpenedURL != nil {
+                    Button { store.reopenLastURL(cookie: firstCookie, file: file) } label: {
+                        Label("Reopen last URL", systemImage: "arrow.clockwise")
+                    }
+                }
+                Button { store.openAtCustomURL(cookie: firstCookie, file: file) } label: {
+                    Label("Open at URL…", systemImage: "link")
+                }
+            }
             Button { store.toggleSaved(file) } label: {
                 Label(file.saved ? "Remove from Saved" : "Save", systemImage: file.saved ? "star.slash" : "star")
             }

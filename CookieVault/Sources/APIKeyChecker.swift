@@ -9,13 +9,72 @@ public enum APIKeyChecker {
     // checks of the same provider don't serialize on URLSession's default 6-per-host cap.
     static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 32
-        cfg.timeoutIntervalForRequest = 8
-        cfg.timeoutIntervalForResource = 12
+        cfg.httpMaximumConnectionsPerHost = 24
+        cfg.timeoutIntervalForRequest = 12
+        cfg.timeoutIntervalForResource = 20
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: cfg)
     }()
+
+    // MARK: - Per-host throttle + retry
+    // Caps how many requests hit one host at once (so bulk checks of one provider don't
+    // trip its rate limiter and mislabel valid keys), while still allowing high total
+    // concurrency across different hosts.
+    actor HostLimiter {
+        private var active: [String: Int] = [:]
+        private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+        let maxPerHost: Int
+        init(maxPerHost: Int) { self.maxPerHost = maxPerHost }
+        func acquire(_ host: String) async {
+            if (active[host] ?? 0) < maxPerHost { active[host, default: 0] += 1; return }
+            await withCheckedContinuation { c in waiters[host, default: []].append(c) }
+        }
+        func release(_ host: String) {
+            if var q = waiters[host], !q.isEmpty {
+                let c = q.removeFirst(); waiters[host] = q; c.resume()   // hand the slot straight to a waiter
+            } else if let n = active[host] {
+                active[host] = max(0, n - 1)
+            }
+        }
+    }
+    static let hostLimiter = HostLimiter(maxPerHost: 24)
+
+    /// All checkers route their primary request through this: per-host throttling plus an
+    /// automatic retry on 429 / rate-limit / transient network errors, so a valid key that
+    /// momentarily gets throttled isn't wrongly reported as limited or errored.
+    static func send(_ req: URLRequest, retries: Int = 2) async throws -> (Data, URLResponse) {
+        let host = req.url?.host ?? ""
+        await hostLimiter.acquire(host)
+        defer { Task { await hostLimiter.release(host) } }
+        var attempt = 0
+        while true {
+            do {
+                let (data, resp) = try await session.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 429 && attempt < retries {
+                    attempt += 1
+                    var wait: UInt64 = UInt64(0.6 * Double(attempt) * 1_000_000_000)
+                    if let ra = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"),
+                       let secs = Double(ra), secs > 0, secs <= 5 { wait = UInt64(secs * 1_000_000_000) }
+                    try? await Task.sleep(nanoseconds: wait)
+                    continue
+                }
+                return (data, resp)
+            } catch {
+                let ns = error as NSError
+                let transient = ns.domain == NSURLErrorDomain &&
+                    [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorCannotConnectToHost,
+                     NSURLErrorNotConnectedToInternet].contains(ns.code)
+                if transient && attempt < retries {
+                    attempt += 1
+                    try? await Task.sleep(nanoseconds: UInt64(0.5 * Double(attempt) * 1_000_000_000))
+                    continue
+                }
+                throw error
+            }
+        }
+    }
 
     // MARK: - Check Result Structure
     public struct CheckResult {
@@ -171,7 +230,7 @@ public enum APIKeyChecker {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
-            let (_, resp) = try await APIKeyChecker.session.data(for: req)
+            let (_, resp) = try await APIKeyChecker.send(req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if (200...299).contains(code) { return (true, "Test message delivered (HTTP \(code))") }
             return (false, "Webhook returned HTTP \(code)")
@@ -441,7 +500,7 @@ public enum APIKeyChecker {
         req.setValue(key, forHTTPHeaderField: "DD-API-KEY")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
@@ -458,7 +517,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -483,7 +542,7 @@ public enum APIKeyChecker {
         req.setValue("application/vnd.heroku+json; version=3", forHTTPHeaderField: "Accept")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -507,7 +566,7 @@ public enum APIKeyChecker {
         req.setValue(key, forHTTPHeaderField: "X-Api-Key")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
@@ -524,7 +583,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -544,7 +603,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -570,7 +629,7 @@ public enum APIKeyChecker {
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": "jina-embeddings-v3", "input": ["ping"]])
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code; d.rawSnippet = String(data: data.prefix(500), encoding: .utf8)
@@ -587,7 +646,7 @@ public enum APIKeyChecker {
         req.setValue(key, forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -617,7 +676,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code
@@ -753,7 +812,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -802,7 +861,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -842,7 +901,7 @@ public enum APIKeyChecker {
         let req = URLRequest(url: url, timeoutInterval: 10)
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -882,7 +941,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -939,7 +998,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (_, response) = try await APIKeyChecker.session.data(for: req)
+            let (_, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -951,7 +1010,7 @@ public enum APIKeyChecker {
                 if let balUrl = URL(string: "https://api.deepseek.com/user/balance") {
                     var balReq = URLRequest(url: balUrl, timeoutInterval: 5)
                     balReq.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                    if let (balData, _) = try? await APIKeyChecker.session.data(for: balReq),
+                    if let (balData, _) = try? await APIKeyChecker.send(balReq),
                        let balJson = try? JSONSerialization.jsonObject(with: balData) as? [String: Any],
                        let balInfo = balJson["balance_infos"] as? [[String: Any]],
                        let firstBal = balInfo.first {
@@ -981,7 +1040,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1026,7 +1085,7 @@ public enum APIKeyChecker {
         req.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1113,7 +1172,7 @@ public enum APIKeyChecker {
         ])
         let start = Date()
         do {
-            let (_, response) = try await APIKeyChecker.session.data(for: req)
+            let (_, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1329,7 +1388,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let httpResp = response as? HTTPURLResponse
             let code = httpResp?.statusCode ?? 0
@@ -1436,7 +1495,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1516,7 +1575,7 @@ public enum APIKeyChecker {
         let req = URLRequest(url: url, timeoutInterval: 10)
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
 
@@ -1561,7 +1620,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
 
@@ -1588,7 +1647,7 @@ public enum APIKeyChecker {
                 if let gUrl = URL(string: "https://discord.com/api/v10/users/@me/guilds") {
                     var gReq = URLRequest(url: gUrl, timeoutInterval: 5)
                     gReq.setValue("Bot \(key)", forHTTPHeaderField: "Authorization")
-                    if let (gd, gResp) = try? await APIKeyChecker.session.data(for: gReq),
+                    if let (gd, gResp) = try? await APIKeyChecker.send(gReq),
                        (gResp as? HTTPURLResponse)?.statusCode == 200,
                        let guilds = try? JSONSerialization.jsonObject(with: gd) as? [[String: Any]] {
                         details.balanceOrQuota = "In \(guilds.count) server\(guilds.count == 1 ? "" : "s")"
@@ -1617,7 +1676,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1649,7 +1708,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1727,7 +1786,7 @@ public enum APIKeyChecker {
         req.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1744,7 +1803,7 @@ public enum APIKeyChecker {
                 if let balUrl = URL(string: "https://api.twilio.com/2010-04-01/Accounts/\(sid)/Balance.json") {
                     var balReq = URLRequest(url: balUrl, timeoutInterval: 5)
                     balReq.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
-                    if let (bd, _) = try? await APIKeyChecker.session.data(for: balReq),
+                    if let (bd, _) = try? await APIKeyChecker.send(balReq),
                        let bj = try? JSONSerialization.jsonObject(with: bd) as? [String: Any],
                        let bal = bj["balance"] as? String {
                         let cur = bj["currency"] as? String ?? "USD"
@@ -1773,7 +1832,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1935,7 +1994,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -1984,7 +2043,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -2002,7 +2061,7 @@ public enum APIKeyChecker {
                 if let acctURL = URL(string: "https://api.stripe.com/v1/account") {
                     var areq = URLRequest(url: acctURL, timeoutInterval: 8)
                     areq.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
-                    if let (adata, _) = try? await APIKeyChecker.session.data(for: areq),
+                    if let (adata, _) = try? await APIKeyChecker.send(areq),
                        let aj = try? JSONSerialization.jsonObject(with: adata) as? [String: Any] {
                         let biz = (aj["business_profile"] as? [String: Any])?["name"] as? String
                         details.accountName = biz ?? (aj["settings"] as? [String: Any]).flatMap { ($0["dashboard"] as? [String: Any])?["display_name"] as? String }
@@ -2088,7 +2147,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
@@ -2313,7 +2372,7 @@ public enum APIKeyChecker {
     private static func httpCheckModels(req: URLRequest, provider: String) async -> CheckResult {
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -2335,6 +2394,11 @@ public enum APIKeyChecker {
                 return CheckResult(status: .valid, snippet: "Valid (\(models.count) models)", details: details)
             } else if code == 401 {
                 return CheckResult(status: .invalid, snippet: "Invalid \(provider) key (HTTP 401)")
+            } else if code == 403 {
+                // Authenticated but restricted — the key is real, just scoped/blocked.
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 403; d.rawSnippet = snippet
+                d.planOrTier = "\(provider) API (restricted)"
+                return CheckResult(status: .permissionDenied, snippet: "\(provider) key valid but restricted (HTTP 403)", details: d)
             } else if code == 429 {
                 return CheckResult(status: .rateLimited, snippet: "Rate limited (HTTP 429)")
             } else {
@@ -2348,12 +2412,25 @@ public enum APIKeyChecker {
     private static func httpCheckGenericBearer(req: URLRequest, provider: String) async -> CheckResult {
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
 
             if (200...299).contains(code) {
+                // Some APIs (GraphQL, Slack, etc.) return HTTP 200 with an error envelope in
+                // the body — treat those as invalid rather than blindly trusting the 200.
+                if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let errs = j["errors"] as? [Any], !errs.isEmpty {
+                        return CheckResult(status: .invalid, snippet: "\(provider): \(snippet.prefix(80))")
+                    }
+                    if (j["ok"] as? Bool) == false || (j["success"] as? Bool) == false {
+                        return CheckResult(status: .invalid, snippet: "\(provider): rejected (\(snippet.prefix(60)))")
+                    }
+                    if let err = j["error"] as? String, !err.isEmpty {
+                        return CheckResult(status: .invalid, snippet: "\(provider): \(err.prefix(80))")
+                    }
+                }
                 var details = KeyDetails()
                 details.latencyMs = latency
                 details.httpCode = code
@@ -2469,7 +2546,7 @@ public enum APIKeyChecker {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (data, response) = try await APIKeyChecker.send(req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             let snippet = String(data: data.prefix(1200), encoding: .utf8) ?? ""
@@ -2479,9 +2556,13 @@ public enum APIKeyChecker {
                 details.latencyMs = latency
                 details.httpCode = code
                 details.rawSnippet = snippet
-                return CheckResult(status: .valid, snippet: "HTTP \(code) OK", details: details)
+                enrichCommonFields(&details, from: data)
+                let extra = details.accountName.map { " · \($0)" } ?? ""
+                return CheckResult(status: .valid, snippet: "Valid (HTTP \(code))\(extra)", details: details)
             } else if code == 401 || code == 403 {
                 return CheckResult(status: .invalid, snippet: "HTTP \(code) Unauthorized")
+            } else if code == 429 {
+                return CheckResult(status: .rateLimited, snippet: "Rate limited (HTTP 429)")
             } else {
                 return CheckResult(status: .error, snippet: "HTTP \(code): \(snippet.prefix(100))")
             }

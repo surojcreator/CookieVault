@@ -164,7 +164,7 @@ struct CookieFileDetailView: View {
                     }
                 }
                 Spacer()
-                if file.cookies.first != nil {
+                if let firstCookie = file.cookies.first {
                     Button { launch() } label: {
                         FilledButton(title: store.isLaunching ? "Launching…" : "Launch Session",
                                      systemImage: store.isLaunching ? nil : "safari.fill",
@@ -174,6 +174,23 @@ struct CookieFileDetailView: View {
                     .buttonStyle(.plain)
                     .disabled(store.isLaunching)
                     .opacity(store.isLaunching ? 0.7 : 1)
+
+                    Menu {
+                        if file.lastOpenedURL != nil {
+                            Button {
+                                store.reopenLastURL(cookie: firstCookie, file: file)
+                            } label: { Label("Reopen last URL", systemImage: "arrow.clockwise") }
+                            Text(file.lastOpenedURL ?? "")
+                        }
+                        Button {
+                            store.openAtCustomURL(cookie: firstCookie, file: file)
+                        } label: { Label("Open at URL…", systemImage: "link") }
+                    } label: {
+                        IconButton(symbol: "chevron.down.circle")
+                    }
+                    .menuStyle(.borderlessButton).frame(width: 30)
+                    .disabled(store.isLaunching)
+                    .help("Reopen the same cookies at a specific URL")
                 }
             }
         }

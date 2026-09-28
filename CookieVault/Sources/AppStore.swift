@@ -188,6 +188,7 @@ public struct CookieFile: Identifiable, Codable {
     public var planName: String? = nil
     public var serviceName: String? = nil
     public var saved: Bool = false
+    public var lastOpenedURL: String? = nil   // remembered launch URL, for "reopen at same URL"
 
     public init(id: UUID = UUID(), name: String, path: String, format: CookieFormat, cookies: [Cookie], addedAt: Date = Date(), tags: [String] = [], note: String = "", folderName: String? = nil, tier: AccountTier = .unknown, accountEmail: String? = nil, planName: String? = nil, serviceName: String? = nil, saved: Bool = false) {
         self.id = id
@@ -207,7 +208,7 @@ public struct CookieFile: Identifiable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, path, format, cookies, addedAt, tags, note, folderName, tier, accountEmail, planName, serviceName, saved
+        case id, name, path, format, cookies, addedAt, tags, note, folderName, tier, accountEmail, planName, serviceName, saved, lastOpenedURL
     }
 
     public init(from decoder: Decoder) throws {
@@ -222,6 +223,7 @@ public struct CookieFile: Identifiable, Codable {
         self.note = (try? c.decode(String.self, forKey: .note)) ?? ""
         self.folderName = try? c.decodeIfPresent(String.self, forKey: .folderName)
         self.saved = (try? c.decodeIfPresent(Bool.self, forKey: .saved)) ?? false
+        self.lastOpenedURL = try? c.decodeIfPresent(String.self, forKey: .lastOpenedURL)
         let loadedTier = (try? c.decodeIfPresent(AccountTier.self, forKey: .tier)) ?? .unknown
         let loadedEmail = try? c.decodeIfPresent(String.self, forKey: .accountEmail)
         let loadedPlan = try? c.decodeIfPresent(String.self, forKey: .planName)
@@ -1519,19 +1521,67 @@ public class AppStore: ObservableObject {
     // Chrome/Chromium, unlike writing the Cookies SQLite file directly (which recent
     // versions discard because cookies must be Keychain-encrypted). If no Chromium
     // browser is installed, the user is offered an open-source Chromium download.
-    public func openInBrowser(cookie: Cookie, file: CookieFile) {
+    /// Default landing URL for a session: the remembered last URL, else the session's main site.
+    func defaultTargetURLString(for file: CookieFile) -> String {
+        if let last = file.lastOpenedURL, !last.isEmpty { return last }
+        let host = Self.bestTargetHost(cookies: file.cookies)
+            ?? (file.cookies.first.map { $0.domain.hasPrefix(".") ? String($0.domain.dropFirst()) : $0.domain } ?? "")
+        return host.isEmpty ? "" : "https://\(host)/"
+    }
+
+    /// Reopen a session at the exact URL it was last opened at (or its main site) — same cookies,
+    /// same page. Useful when a session times out and you want to land right back where you were.
+    public func reopenLastURL(cookie: Cookie, file: CookieFile) {
+        openInBrowser(cookie: cookie, file: file, explicitURLString: defaultTargetURLString(for: file))
+    }
+
+    /// Prompt for a specific URL (prefilled with the remembered/main URL) and open the session there.
+    @MainActor
+    public func openAtCustomURL(cookie: Cookie, file: CookieFile) {
+        let alert = NSAlert()
+        alert.messageText = "Open “\(file.accountEmail ?? file.name)” at URL"
+        alert.informativeText = "Injects this account's cookies and navigates the isolated browser to this URL."
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = defaultTargetURLString(for: file)
+        field.placeholderString = "https://example.com/path"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal().rawValue == 1000 else { return }
+        var urlStr = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !urlStr.isEmpty else { return }
+        if !urlStr.lowercased().hasPrefix("http://") && !urlStr.lowercased().hasPrefix("https://") {
+            urlStr = "https://" + urlStr
+        }
+        openInBrowser(cookie: cookie, file: file, explicitURLString: urlStr)
+    }
+
+    public func openInBrowser(cookie: Cookie, file: CookieFile, explicitURLString: String? = nil) {
         guard !file.cookies.isEmpty else {
             showToast("No cookies to inject for \(file.name)", type: .warning)
             return
         }
-        // Pick the site the session actually belongs to rather than blindly using the
-        // first cookie (often an analytics domain). Prefer the most common registrable
-        // domain across all cookies; fall back to the clicked cookie's domain.
-        let host = Self.bestTargetHost(cookies: file.cookies)
-            ?? (cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain)
-        guard !host.isEmpty, let targetURL = URL(string: "https://" + host + "/") else {
-            showToast("No valid domain to open for \(file.name)", type: .error)
-            return
+        // Use an explicit URL when provided (reopen / custom URL); otherwise pick the site the
+        // session actually belongs to — the most common registrable domain across all cookies,
+        // falling back to the clicked cookie's domain.
+        let targetURL: URL
+        if let explicit = explicitURLString, let u = URL(string: explicit) {
+            targetURL = u
+        } else {
+            let host = Self.bestTargetHost(cookies: file.cookies)
+                ?? (cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain)
+            guard !host.isEmpty, let u = URL(string: "https://" + host + "/") else {
+                showToast("No valid domain to open for \(file.name)", type: .error)
+                return
+            }
+            targetURL = u
+        }
+
+        // Remember the URL so "Reopen" lands on the same page next time.
+        if let fi = cookieFiles.firstIndex(where: { $0.id == file.id }) {
+            cookieFiles[fi].lastOpenedURL = targetURL.absoluteString
+            save()
         }
 
         let label = file.accountEmail ?? file.name
@@ -1601,7 +1651,7 @@ public class AppStore: ObservableObject {
     /// (no per-chunk barrier, so one slow/dead key never stalls the rest). `onEach` runs on the
     /// main actor as each result lands.
     @MainActor
-    private func streamCheck(_ targets: [CheckTarget], maxConcurrent: Int = 40,
+    private func streamCheck(_ targets: [CheckTarget], maxConcurrent: Int = 64,
                              onEach: @escaping (UUID, APIKeyChecker.CheckResult, _ done: Int, _ total: Int) -> Void) async {
         let total = targets.count
         guard total > 0 else { return }
@@ -1736,7 +1786,7 @@ public class AppStore: ObservableObject {
             f.keys.prefix(limitPerFile).map { CheckTarget(id: $0.id, value: $0.value, service: f.service, endpoint: f.checkEndpoint) }
         }
         let locations = makeKeyLocationMap()
-        await streamCheck(targets, maxConcurrent: 48) { [weak self] id, res, done, total in
+        await streamCheck(targets, maxConcurrent: 128) { [weak self] id, res, done, total in
             self?.applyResult(id, res, locations)
             self?.batchCheckProgress = Double(done) / Double(total)
         }
