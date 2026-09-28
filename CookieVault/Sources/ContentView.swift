@@ -621,7 +621,8 @@ struct APIKeysSidebarList: View {
                                         SidebarFileRow(name: file.displayName, subtitle: "\(file.keys.count) keys",
                                                        icon: file.icon, color: Theme.gold,
                                                        isSelected: store.selectedAPIFile?.id == file.id && store.selectedAPIFolder == nil,
-                                                       isIndented: true) {
+                                                       isIndented: true,
+                                                       validCount: file.keys.filter { $0.status == .valid }.count) {
                                             store.showAllValidKeys = false; store.selectedAPIFolder = nil; store.selectedAPIFile = file
                                         }
                                     }
@@ -638,7 +639,8 @@ struct APIKeysSidebarList: View {
                         SidebarFileRow(name: file.displayName, subtitle: "\(file.keys.count) keys",
                                        icon: file.icon, color: Theme.gold,
                                        isSelected: store.selectedAPIFile?.id == file.id && store.selectedAPIFolder == nil,
-                                       isIndented: false) {
+                                       isIndented: false,
+                                       validCount: file.keys.filter { $0.status == .valid }.count) {
                             store.showAllValidKeys = false; store.selectedAPIFolder = nil; store.selectedAPIFile = file
                         }
                     }
@@ -781,6 +783,7 @@ struct SidebarFileRow: View {
     let color: Color
     let isSelected: Bool
     var isIndented: Bool = false
+    var validCount: Int? = nil
     let action: () -> Void
     @StateObject private var hover = Hover()
 
@@ -794,6 +797,16 @@ struct SidebarFileRow: View {
                     Text(subtitle).font(.system(size: 9)).foregroundColor(Theme.textTer)
                 }
                 Spacer()
+                if let vc = validCount, vc > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark.seal.fill").font(.system(size: 7))
+                        Text("\(vc)").font(.system(size: 9, weight: .bold, design: .rounded))
+                    }
+                    .foregroundColor(Theme.green)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Theme.green.opacity(0.15)))
+                    .help("\(vc) valid key\(vc == 1 ? "" : "s")")
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(

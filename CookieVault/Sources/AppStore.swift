@@ -1302,6 +1302,24 @@ public class AppStore: ObservableObject {
         showToast("Copied \(valid.count) valid key\(valid.count == 1 ? "" : "s")", type: .success)
     }
 
+    // MARK: - Account interaction (act on the account behind a key)
+
+    /// Open the provider's dashboard where this key's account is managed.
+    public func openProviderDashboard(service: String) {
+        guard let s = APIKeyChecker.dashboardURL(service: service), let url = URL(string: s) else {
+            showToast("No known dashboard for this provider", type: .warning); return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Send a harmless test message through a webhook key (Discord/Slack/Teams).
+    @MainActor
+    public func sendWebhookTest(_ key: APIKey, service: String) async {
+        let (ok, msg) = await APIKeyChecker.sendWebhookTest(key: key.value, service: service,
+                                                            text: "✅ CookieVault test message")
+        showToast(ok ? msg : "Webhook test failed: \(msg)", type: ok ? .success : .error)
+    }
+
     /// QoL: copy every valid key across ALL files to the clipboard.
     public func copyAllValidKeys() {
         let all = apiKeyFiles.flatMap { $0.keys.filter { $0.status == .valid } }

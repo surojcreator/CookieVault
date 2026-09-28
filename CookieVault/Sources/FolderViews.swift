@@ -774,6 +774,7 @@ struct KeyInspectorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     keyValueCard
+                    accountActionsCard
                     if let details = key.details { metadataSection(details) }
                     curlCard
                     if let raw = key.details?.rawSnippet ?? key.responseSnippet, !raw.isEmpty { rawCard(raw) }
@@ -818,6 +819,40 @@ struct KeyInspectorSheet: View {
                 .textSelection(.enabled).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: Theme.rSm).fill(Theme.inset))
                 .overlay(RoundedRectangle(cornerRadius: Theme.rSm).stroke(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private var hasDashboard: Bool { APIKeyChecker.dashboardURL(service: file.service) != nil }
+    private var isWebhook: Bool { APIKeyChecker.isWebhook(service: file.service) }
+
+    @ViewBuilder private var accountActionsCard: some View {
+        if hasDashboard || isWebhook {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionLabel(text: "Interact with this Account")
+                Text("Act on the \(file.displayName) account this key belongs to.")
+                    .font(.system(size: 10.5)).foregroundColor(Theme.textTer)
+                HStack(spacing: 10) {
+                    if hasDashboard {
+                        Button { store.openProviderDashboard(service: file.service) } label: {
+                            GhostButton(title: "Open \(file.displayName) Dashboard", systemImage: "arrow.up.forward.app", tint: Theme.accent2)
+                        }.buttonStyle(.plain)
+                    }
+                    if isWebhook {
+                        Button { Task { await store.sendWebhookTest(key, service: file.service) } } label: {
+                            GhostButton(title: "Send Test Message", systemImage: "paperplane.fill", tint: Theme.green)
+                        }.buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+                if isWebhook {
+                    Text("Posts “✅ CookieVault test message” to the connected channel.")
+                        .font(.system(size: 9.5)).foregroundColor(Theme.textTer)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.rMd).fill(Theme.inset))
+            .overlay(RoundedRectangle(cornerRadius: Theme.rMd).stroke(Theme.accent.opacity(0.2), lineWidth: 1))
         }
     }
 

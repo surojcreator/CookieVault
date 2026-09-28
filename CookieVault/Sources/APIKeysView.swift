@@ -154,6 +154,11 @@ struct APIFileDetailView: View {
                     .font(.system(size: 12)).foregroundColor(Theme.textTer).lineLimit(1)
             }
             Spacer()
+            if APIKeyChecker.dashboardURL(service: vm.file.service) != nil {
+                Button { store.openProviderDashboard(service: vm.file.service) } label: {
+                    GhostButton(title: "Dashboard", systemImage: "arrow.up.forward.app", tint: Theme.accent2)
+                }.buttonStyle(.plain).help("Open the \(vm.file.displayName) account dashboard")
+            }
             Button {
                 vm.selectMode.toggle()
                 if !vm.selectMode { vm.selectedIDs.removeAll() }

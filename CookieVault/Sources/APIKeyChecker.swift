@@ -90,6 +90,83 @@ public enum APIKeyChecker {
         }
     }
 
+    // MARK: - Account interaction (act on the account the key belongs to)
+
+    /// The provider's web dashboard/console — where the key's account is managed.
+    public static func dashboardURL(service: String) -> String? {
+        let s = service.lowercased()
+        let map: [String: String] = [
+            "openai": "https://platform.openai.com/account", "openai_asst": "https://platform.openai.com/assistants",
+            "anthropic": "https://console.anthropic.com/settings/keys", "google_ai": "https://aistudio.google.com/app/apikey",
+            "openrouter": "https://openrouter.ai/keys", "groq": "https://console.groq.com/keys",
+            "deepseek": "https://platform.deepseek.com", "mistral": "https://console.mistral.ai",
+            "huggingface": "https://huggingface.co/settings/tokens", "cohere": "https://dashboard.cohere.com/api-keys",
+            "replicate": "https://replicate.com/account/api-tokens", "perplexity": "https://www.perplexity.ai/settings/api",
+            "xai": "https://console.x.ai", "together": "https://api.together.ai/settings/api-keys",
+            "elevenlabs": "https://elevenlabs.io/app/settings/api-keys", "deepl": "https://www.deepl.com/account/summary",
+            "stripe": "https://dashboard.stripe.com/apikeys", "razorpay": "https://dashboard.razorpay.com",
+            "shopify": "https://admin.shopify.com", "square": "https://developer.squareup.com/apps",
+            "github": "https://github.com/settings/tokens", "gitlab": "https://gitlab.com/-/profile/personal_access_tokens",
+            "vercel": "https://vercel.com/account/tokens", "netlify": "https://app.netlify.com/user/applications",
+            "render": "https://dashboard.render.com", "heroku": "https://dashboard.heroku.com/account/applications",
+            "digitalocean": "https://cloud.digitalocean.com/account/api/tokens", "flyio": "https://fly.io/dashboard",
+            "datadog": "https://app.datadoghq.com/organization-settings/api-keys", "newrelic": "https://one.newrelic.com/api-keys",
+            "sentry": "https://sentry.io/settings/account/api/auth-tokens/", "grafana": "https://grafana.com/profile/api-keys",
+            "telegram_bot": "https://t.me/BotFather", "discord_bot": "https://discord.com/developers/applications",
+            "slack": "https://api.slack.com/apps", "twilio": "https://console.twilio.com",
+            "sendgrid": "https://app.sendgrid.com/settings/api_keys", "mailchimp": "https://admin.mailchimp.com/account/api/",
+            "mailgun": "https://app.mailgun.com/settings/api_security", "brevo": "https://app.brevo.com/settings/keys/api",
+            "resend": "https://resend.com/api-keys", "postmark": "https://account.postmarkapp.com", "klaviyo": "https://www.klaviyo.com/settings/account/api-keys",
+            "intercom": "https://app.intercom.com/a/apps/_/developer-hub", "notion": "https://www.notion.so/my-integrations",
+            "airtable": "https://airtable.com/create/tokens", "figma": "https://www.figma.com/developers/api#access-tokens",
+            "clickup": "https://app.clickup.com/settings/apps", "trello": "https://trello.com/power-ups/admin",
+            "dropbox": "https://www.dropbox.com/developers/apps", "typeform": "https://admin.typeform.com/account#/section/tokens",
+            "mapbox": "https://account.mapbox.com/access-tokens/", "spotify": "https://developer.spotify.com/dashboard",
+            "supabase": "https://supabase.com/dashboard/project/_/settings/api", "neon": "https://console.neon.tech",
+            "pinecone": "https://app.pinecone.io", "apify": "https://console.apify.com/account/integrations",
+            "aws_access_key": "https://console.aws.amazon.com/iam/home#/security_credentials",
+            "cloudflare": "https://dash.cloudflare.com/profile/api-tokens", "pagerduty": "https://app.pagerduty.com",
+            "docker": "https://hub.docker.com/settings/security", "npm": "https://www.npmjs.com/settings/~/tokens",
+            "facebook": "https://developers.facebook.com/tools/accesstoken/", "riot": "https://developer.riotgames.com"
+        ]
+        return map[s]
+    }
+
+    /// True when this provider is an incoming webhook we can post a test message to using only the key/URL.
+    public static func isWebhook(service: String) -> Bool {
+        ["discord_webhook", "slack_webhook", "teams_webhook"].contains(service.lowercased())
+    }
+
+    /// Post a harmless test message to a webhook the user owns (Discord/Slack/Teams). Returns (ok, message).
+    public static func sendWebhookTest(key: String, service: String, text: String) async -> (Bool, String) {
+        let s = service.lowercased()
+        let urlStr: String
+        var body: [String: Any]
+        switch s {
+        case "discord_webhook":
+            urlStr = key.hasPrefix("http") ? key : "https://discord.com/api/webhooks/\(key)"
+            body = ["content": text]
+        case "slack_webhook", "teams_webhook":
+            urlStr = key
+            body = ["text": text]
+        default:
+            return (false, "Not a webhook provider")
+        }
+        guard let url = URL(string: urlStr) else { return (false, "Invalid webhook URL") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (_, resp) = try await APIKeyChecker.session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if (200...299).contains(code) { return (true, "Test message delivered (HTTP \(code))") }
+            return (false, "Webhook returned HTTP \(code)")
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
     // MARK: - Main Check Dispatcher
     public static func check(key: String, service: String, endpoint: String?) async -> CheckResult {
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1109,12 +1186,7 @@ public enum APIKeyChecker {
 
     // 31. Hyperbrowser
     private static func checkHyperbrowser(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Hyperbrowser Key"
-        if key.count >= 16 {
-            return CheckResult(status: .valid, snippet: "Valid Hyperbrowser API key", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Hyperbrowser key format")
+        return formatOnly("Hyperbrowser API Key", key: key, minLen: 16)
     }
 
     // 32. Browserbase
@@ -1210,14 +1282,10 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "Bitbucket")
     }
 
-    // 36. Atlassian
+    // 36. Atlassian (needs the account email for Basic auth, so format-only here)
     private static func checkAtlassian(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Atlassian API Token"
-        if key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Atlassian API Token format", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Atlassian API Token format")
+        let type = key.hasPrefix("ATATT") ? "API Token (v2)" : key.hasPrefix("ATCTT") ? "Scoped Token" : "API Token"
+        return formatOnly("Atlassian \(type)", key: key, minLen: 20)
     }
 
     // 37. Docker Hub
@@ -1285,52 +1353,31 @@ public enum APIKeyChecker {
 
     // 41. SonarQube
     private static func checkSonarQube(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "SonarQube User Token"
-        if key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid SonarQube Token format", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid SonarQube Token format")
+        let type = key.hasPrefix("squ_") ? "User Token" : key.hasPrefix("sqp_") ? "Project Token" : key.hasPrefix("sqa_") ? "Global Analysis Token" : "Token"
+        return formatOnly("SonarQube \(type)", key: key, minLen: 20)
     }
 
     // 42. Grafana
     private static func checkGrafana(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Grafana API Key"
-        if key.hasPrefix("ey") || key.count >= 24 {
-            return CheckResult(status: .valid, snippet: "Valid Grafana API Token", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Grafana Token format")
+        let type = key.hasPrefix("glsa_") ? "Service Account Token" : key.hasPrefix("glc_") ? "Cloud Token" : key.hasPrefix("eyJ") ? "JWT API Key" : "API Key"
+        return formatOnly("Grafana \(type)", key: key, minLen: 24)
     }
 
     // 43. HashiCorp Vault
     private static func checkHashiCorpVault(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Vault Token"
-        if key.hasPrefix("hvs.") || key.hasPrefix("s.") || key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid HashiCorp Vault Token", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Vault Token format")
+        let type = key.hasPrefix("hvs.") ? "Service Token" : key.hasPrefix("hvb.") ? "Batch Token" : key.hasPrefix("s.") ? "Legacy Token" : "Token"
+        return formatOnly("Vault \(type)", key: key, minLen: 20)
     }
 
     // 44. Infisical
     private static func checkInfisical(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Infisical Secret Token"
-        if key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Infisical Token", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Infisical Token format")
+        let type = key.hasPrefix("st.") ? "Service Token" : "Secret Token"
+        return formatOnly("Infisical \(type)", key: key, minLen: 20)
     }
 
-    // 45. 1Password
+    // 45. 1Password — service-account tokens are JWT-shaped after the ops_ prefix.
     private static func check1Password(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "1Password Service Account Token"
-        if key.hasPrefix("eyJ") || key.count >= 30 {
-            return CheckResult(status: .valid, snippet: "Valid 1Password Service Token", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid 1Password Token format")
+        return formatOnly("1Password Service Account Token", key: key, minLen: 30)
     }
 
     // 46. Pipedream
@@ -1511,24 +1558,31 @@ public enum APIKeyChecker {
         }
     }
 
-    // 51. Slack Webhook
+    // 51. Slack Webhook — extract the workspace/team segment from the URL.
     private static func checkSlackWebhook(key: String) async -> CheckResult {
+        guard key.contains("hooks.slack.com/services") else {
+            return key.count >= 24 ? formatOnly("Slack Webhook", key: key, minLen: 24)
+                                   : CheckResult(status: .invalid, snippet: "Invalid Slack Webhook format")
+        }
         var details = KeyDetails()
         details.planOrTier = "Slack Incoming Webhook"
-        if key.contains("hooks.slack.com/services") || key.count >= 24 {
-            return CheckResult(status: .valid, snippet: "Valid Slack Webhook URL format", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Slack Webhook format")
+        let segs = key.components(separatedBy: "/services/").last?.components(separatedBy: "/") ?? []
+        if let team = segs.first { details.accountName = "Team \(team)" }
+        details.permissions = segs.prefix(2).map { "id=\($0)" }
+        return CheckResult(status: .valid, snippet: "Valid Slack Webhook (\(details.accountName ?? "active"))", details: details)
     }
 
-    // 52. Teams Webhook
+    // 52. Teams Webhook — pull the tenant/host from the URL.
     private static func checkTeamsWebhook(key: String) async -> CheckResult {
+        guard let comp = URLComponents(string: key), let host = comp.host,
+              key.contains("webhook") || host.contains("office") || host.contains("azure") else {
+            return key.count >= 30 ? formatOnly("Teams Webhook", key: key, minLen: 30)
+                                   : CheckResult(status: .invalid, snippet: "Invalid Teams Webhook format")
+        }
         var details = KeyDetails()
         details.planOrTier = "MS Teams Incoming Webhook"
-        if key.contains("webhook") || key.count >= 30 {
-            return CheckResult(status: .valid, snippet: "Valid Teams Webhook URL format", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Teams Webhook format")
+        details.accountName = host
+        return CheckResult(status: .valid, snippet: "Valid Teams Webhook (\(host))", details: details)
     }
 
     // 53. Twilio — live check when the token is provided as "SID:token".
@@ -1738,13 +1792,18 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "Neon Postgres")
     }
 
-    // 65. Supabase
+    // 65. Supabase — decode the JWT to reveal role (anon/service_role) + project ref.
     private static func checkSupabase(key: String) async -> CheckResult {
         var details = KeyDetails()
-        details.planOrTier = "Supabase API Key"
-        if key.hasPrefix("eyJ") || key.count >= 30 {
-            details.balanceOrQuota = "JWT Key Token"
-            return CheckResult(status: .valid, snippet: "Valid Supabase Key Token", details: details)
+        if enrichFromJWT(key, into: &details) {
+            let role = (decodeJWT(key)?["role"] as? String) ?? "key"
+            let warn = role == "service_role" ? " ⚠️ SERVICE ROLE (full DB access)" : ""
+            return CheckResult(status: .valid, snippet: "Valid Supabase \(role) key\(warn)", details: details)
+        }
+        // sb_secret_ / sb_publishable_ (new-style) keys aren't JWTs.
+        if key.hasPrefix("sb_secret_") || key.hasPrefix("sb_publishable_") || key.count >= 30 {
+            details.planOrTier = key.hasPrefix("sb_secret_") ? "Secret Key" : "Publishable/Anon Key"
+            return CheckResult(status: .valid, snippet: "Valid Supabase key (\(details.planOrTier!))", details: details)
         }
         return CheckResult(status: .invalid, snippet: "Invalid Supabase key format")
     }
@@ -1852,22 +1911,26 @@ public enum APIKeyChecker {
 
     // 69. Razorpay
     private static func checkRazorpay(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Razorpay API Key"
-        if key.hasPrefix("rzp_live_") || key.hasPrefix("rzp_test_") || key.count >= 16 {
-            return CheckResult(status: .valid, snippet: "Valid Razorpay Key ID", details: details)
+        // "key_id:key_secret" → live Basic-auth check; otherwise format-only.
+        let parts = key.components(separatedBy: ":")
+        let mode = key.contains("_live_") ? "Live" : key.contains("_test_") ? "Test" : "Key"
+        if parts.count == 2, parts[0].hasPrefix("rzp_"), !parts[1].isEmpty,
+           let url = URL(string: "https://api.razorpay.com/v1/payments?count=1") {
+            var req = URLRequest(url: url, timeoutInterval: 10)
+            let auth = Data("\(parts[0]):\(parts[1])".utf8).base64EncodedString()
+            req.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
+            return await httpCheckGenericBearer(req: req, provider: "Razorpay (\(mode))")
         }
-        return CheckResult(status: .invalid, snippet: "Invalid Razorpay Key format")
+        return formatOnly("Razorpay \(mode) Key ID", key: key, minLen: 16,
+                          extra: "Razorpay \(mode) Key (provide id:secret for live check)")
     }
 
-    // 70. Shopify
+    // 70. Shopify — token type from prefix (shop domain unknown, so no live call).
     private static func checkShopify(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Shopify Admin Token"
-        if key.hasPrefix("shpat_") || key.hasPrefix("shpca_") || key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Shopify Access Token", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Shopify Token format")
+        let type = key.hasPrefix("shpat_") ? "Admin API Token" : key.hasPrefix("shpca_") ? "Custom App Token"
+                 : key.hasPrefix("shppa_") ? "Private App Token" : key.hasPrefix("shpss_") ? "Shared Secret" : "Access Token"
+        return formatOnly("Shopify \(type)", key: key, minLen: 20,
+                          extra: "Shopify \(type) (needs shop domain for live check)")
     }
 
     // 71. Square
@@ -1882,12 +1945,9 @@ public enum APIKeyChecker {
 
     // 72. Checkout.com
     private static func checkCheckout(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Checkout.com Key"
-        if key.hasPrefix("sk_") || key.hasPrefix("pk_") || key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Checkout.com Key", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Checkout.com Key format")
+        let live = key.contains("_live_") || key.hasPrefix("sk_") && !key.contains("_test_")
+        let type = key.hasPrefix("sk") ? "Secret Key" : key.hasPrefix("pk") ? "Public Key" : "Key"
+        return formatOnly("Checkout.com \(live ? "Live" : "Test") \(type)", key: key, minLen: 20)
     }
 
     // 73. Flutterwave
@@ -1956,14 +2016,19 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "Mapbox")
     }
 
-    // 77. Mux
+    // 77. Mux — "TokenID:TokenSecret" for basic auth.
     private static func checkMux(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Mux API Key"
-        if key.contains(":") || key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Mux Token Credentials", details: details)
+        let parts = key.components(separatedBy: ":")
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            return formatOnly("Mux Token", key: key, minLen: 20)
         }
-        return CheckResult(status: .invalid, snippet: "Invalid Mux Token format")
+        guard let url = URL(string: "https://api.mux.com/video/v1/assets?limit=1") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        let auth = Data("\(parts[0]):\(parts[1])".utf8).base64EncodedString()
+        req.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
+        return await httpCheckGenericBearer(req: req, provider: "Mux")
     }
 
     // 78. Sentry API
@@ -1976,14 +2041,18 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "Sentry API")
     }
 
-    // 79. Sentry DSN
+    // 79. Sentry DSN — parse host + project id out of the URL.
     private static func checkSentryDSN(_ dsn: String) -> CheckResult {
+        guard let comp = URLComponents(string: dsn), let host = comp.host, comp.user != nil else {
+            return CheckResult(status: .invalid, snippet: "Invalid Sentry DSN format")
+        }
         var details = KeyDetails()
         details.planOrTier = "Sentry DSN"
-        if (dsn.hasPrefix("http://") || dsn.hasPrefix("https://")) && dsn.contains("@") {
-            return CheckResult(status: .valid, snippet: "Valid Sentry DSN URL", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Sentry DSN format")
+        details.accountName = host
+        let projectId = comp.path.split(separator: "/").last.map(String.init) ?? "?"
+        details.balanceOrQuota = "Project \(projectId)"
+        details.permissions = ["public-key=\(comp.user!.prefix(8))…", "host=\(host)"]
+        return CheckResult(status: .valid, snippet: "Valid Sentry DSN · \(host) · project \(projectId)", details: details)
     }
 
     // 80. LaunchDarkly
@@ -2006,14 +2075,17 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "PagerDuty")
     }
 
-    // 82. LiveKit
+    // 82. LiveKit — credentials are "APIkey:secret".
     private static func checkLiveKit(key: String) async -> CheckResult {
+        let parts = key.components(separatedBy: ":")
         var details = KeyDetails()
         details.planOrTier = "LiveKit API Key"
-        if key.hasPrefix("API") || key.count >= 16 {
-            return CheckResult(status: .valid, snippet: "Valid LiveKit Key Credentials", details: details)
+        if let id = parts.first, id.hasPrefix("API") {
+            details.accountName = id
+            details.balanceOrQuota = parts.count >= 2 ? "key:secret pair" : "key id only"
+            return CheckResult(status: .valid, snippet: "Valid LiveKit key (\(id))", details: details)
         }
-        return CheckResult(status: .invalid, snippet: "Invalid LiveKit Key format")
+        return formatOnly("LiveKit Key", key: key, minLen: 16)
     }
 
     // 83. Figma
@@ -2077,14 +2149,8 @@ public enum APIKeyChecker {
 
     // 89. Firebase FCM
     private static func checkFirebaseFCM(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Firebase FCM Legacy Key"
-        if key.hasPrefix("AAAA") && key.count >= 50 {
-            return CheckResult(status: .valid, snippet: "Valid Firebase FCM Server Key", details: details)
-        } else if key.count >= 30 {
-            return CheckResult(status: .valid, snippet: "Valid Firebase Key Format", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Firebase FCM Key format")
+        let type = key.hasPrefix("AAAA") ? "Legacy Server Key" : key.hasPrefix("AIza") ? "Web/Cloud API Key" : "Key"
+        return formatOnly("Firebase FCM \(type)", key: key, minLen: 30)
     }
 
     // 90. Apify
@@ -2108,14 +2174,10 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "CapSolver")
     }
 
-    // 92. Riot Games
+    // 92. Riot Games (RGAPI- dev keys rotate every 24h)
     private static func checkRiot(key: String) async -> CheckResult {
-        var details = KeyDetails()
-        details.planOrTier = "Riot Games API Key"
-        if key.hasPrefix("RGAPI-") || key.count >= 20 {
-            return CheckResult(status: .valid, snippet: "Valid Riot Games API Key", details: details)
-        }
-        return CheckResult(status: .invalid, snippet: "Invalid Riot API Key format")
+        let type = key.hasPrefix("RGAPI-") ? "Development Key (24h rotating)" : "Production Key"
+        return formatOnly("Riot Games \(type)", key: key, minLen: 20)
     }
 
     // 93. Spotify
@@ -2233,6 +2295,55 @@ public enum APIKeyChecker {
         if details.planOrTier == nil, let status = str(["status", "state"]) {
             details.planOrTier = status.capitalized
         }
+    }
+
+    // MARK: - Offline enrichment helpers (for keys with no callable endpoint)
+
+    /// Decode a JWT's payload (middle segment) without verifying the signature.
+    static func decodeJWT(_ token: String) -> [String: Any]? {
+        let parts = token.components(separatedBy: ".")
+        guard parts.count == 3 else { return nil }
+        var b64 = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        guard let data = Data(base64Encoded: b64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json
+    }
+
+    /// Populate details from JWT claims (role, ref/project, issuer, expiry). Returns true if it was a JWT.
+    static func enrichFromJWT(_ token: String, into details: inout KeyDetails) -> Bool {
+        guard let claims = decodeJWT(token) else { return false }
+        if let role = claims["role"] as? String { details.planOrTier = "Role: \(role)" }
+        if details.accountName == nil {
+            details.accountName = (claims["ref"] as? String).map { "Project: \($0)" }
+                ?? (claims["iss"] as? String) ?? (claims["sub"] as? String)
+        }
+        if let exp = claims["exp"] as? Double {
+            let d = Date(timeIntervalSince1970: exp)
+            let expired = d < Date()
+            details.balanceOrQuota = (expired ? "Expired " : "Expires ") + d.formatted(date: .abbreviated, time: .omitted)
+        }
+        // Surface a few notable claim keys as "permissions" so the UI shows structure.
+        let notable = ["iss", "role", "ref", "aud", "scope", "scopes"]
+        let present = notable.filter { claims[$0] != nil }
+        if !present.isEmpty { details.permissions = present.map { "\($0)=\(claims[$0]!)".prefix(48).description } }
+        return true
+    }
+
+    /// Structural fallback: mark a key valid-by-format with a helpful descriptor. Never claims a live check.
+    private static func formatOnly(_ label: String, key: String, minLen: Int = 8, extra: String? = nil) -> CheckResult {
+        var details = KeyDetails()
+        // If it's actually a JWT, decode it for real detail.
+        if enrichFromJWT(key, into: &details) {
+            details.rawSnippet = "JWT-format \(label)"
+            return CheckResult(status: .valid, snippet: "Valid \(label) (JWT · \(details.planOrTier ?? "decoded"))", details: details)
+        }
+        details.planOrTier = extra ?? label
+        details.balanceOrQuota = "\(key.count) chars"
+        guard key.count >= minLen, !key.contains(" ") else {
+            return CheckResult(status: .invalid, snippet: "Invalid \(label) format")
+        }
+        return CheckResult(status: .valid, snippet: "Valid \(label) format (\(key.count) chars, not network-verified)", details: details)
     }
 
     private static func genericHTTPCheck(key: String, url: URL) async -> CheckResult {
