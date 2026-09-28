@@ -906,206 +906,185 @@ public class AppStore: ObservableObject {
         }
     }
 
-    // MARK: - Folder Import Engine (Recursive)
+    /// Parse a batch of file URLs concurrently off the main thread. Pure w.r.t. app state —
+    /// reads + parses only, returning the built models to commit on the main actor.
+    struct ParsedBatch {
+        var cookies: [CookieFile] = []
+        var apis: [APIKeyFile] = []
+        var states: [UUID: AccountState] = [:]
+        var metrics: [UUID: AccountMetrics] = [:]
+    }
+
+    private func parseFilesConcurrently(_ urls: [URL], folderName: String, tab: AppTab) async -> ParsedBatch {
+        // Parse + fully classify one file off the main thread (all pure work).
+        func parseOne(_ fileURL: URL) -> (CookieFile?, APIKeyFile?, AccountState?, AccountMetrics?) {
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return (nil, nil, nil, nil) }
+            let isCookie = isCookieContent(content)
+            if tab == .cookies || isCookie {
+                let format = detectFormat(content)
+                let cookies = parseCookies(content: content, format: format)
+                guard !cookies.isEmpty else { return (nil, nil, nil, nil) }
+                let baseName = fileURL.deletingPathExtension().lastPathComponent
+                let meta = AppStore.extractCookieMetadata(fileName: baseName, path: fileURL.path)
+                // Authoritative service comes from cookie domains, falling back to filename.
+                let service = AppStore.deriveSite(from: cookies) ?? meta.service
+                let r = PlanClassifier.classify(service: service ?? "", name: baseName)
+                let file = CookieFile(name: baseName, path: fileURL.path, format: format, cookies: cookies,
+                                      folderName: folderName, tier: r.tier, accountEmail: meta.email,
+                                      planName: r.plan ?? meta.plan, serviceName: service)
+                let metrics = AccountMetrics.parse(name: baseName)
+                return (file, nil, r.state, metrics)
+            } else {
+                var keys: [APIKey] = []
+                content.enumerateLines { line, _ in
+                    let t = line.trimmingCharacters(in: .whitespaces)
+                    if !t.isEmpty { keys.append(APIKey(value: t)) }
+                }
+                guard !keys.isEmpty else { return (nil, nil, nil, nil) }
+                let serviceName = fileURL.deletingPathExtension().lastPathComponent.lowercased()
+                let info = serviceInfo(for: serviceName)
+                return (nil, APIKeyFile(service: serviceName, displayName: info.displayName, icon: info.icon,
+                                        keys: keys, checkEndpoint: info.endpoint, folderName: folderName), nil, nil)
+            }
+        }
+        // Bounded concurrency so a folder with thousands of files can't spawn thousands of
+        // simultaneous reads (memory/thread blowup). Keep a fixed window in flight.
+        let maxConcurrent = 12
+        var batch = ParsedBatch()
+        return await withTaskGroup(of: (CookieFile?, APIKeyFile?, AccountState?, AccountMetrics?).self) { group in
+            var next = 0
+            func launch() {
+                guard next < urls.count else { return }
+                let u = urls[next]; next += 1
+                group.addTask { parseOne(u) }
+            }
+            for _ in 0..<min(maxConcurrent, urls.count) { launch() }
+            while let (c, a, st, m) = await group.next() {
+                if let c {
+                    batch.cookies.append(c)
+                    if let st { batch.states[c.id] = st }
+                    if let m { batch.metrics[c.id] = m }
+                }
+                if let a { batch.apis.append(a) }
+                launch()
+            }
+            return batch
+        }
+    }
+
+    // MARK: - Folder Import Engine (Recursive, off-main + concurrent)
     public func importFolder(from folderURL: URL, targetTab: AppTab? = nil) {
         let folderName = folderURL.lastPathComponent
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
             return
         }
-
-        var importedCookiesCount = 0
-        var importedKeysCount = 0
-        var newCookieFiles: [CookieFile] = []
-        var newAPIKeyFiles: [APIKeyFile] = []
-
         let tab = targetTab ?? currentTab
 
+        // Enumerate quickly on the calling thread; parse heavy content in the background.
+        var fileURLs: [URL] = []
         for case let fileURL as URL in enumerator {
-            guard let isRegular = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile, isRegular else {
-                continue
-            }
+            guard let isRegular = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile, isRegular else { continue }
             let ext = fileURL.pathExtension.lowercased()
-
-            if ext == "zip" {
-                // Nested zip inside folder
-                importZip(from: fileURL, parentFolder: folderName, targetTab: tab)
-                continue
-            }
-
+            if ext == "zip" { importZip(from: fileURL, parentFolder: folderName, targetTab: tab); continue }
             guard ext == "txt" || ext == "json" else { continue }
-            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+            fileURLs.append(fileURL)
+        }
+        guard !fileURLs.isEmpty else { return }
 
-            let isCookie = isCookieContent(content)
-
-            if tab == .cookies || isCookie {
-                let format = detectFormat(content)
-                let cookies = parseCookies(content: content, format: format)
-                if !cookies.isEmpty {
-                    let baseName = fileURL.deletingPathExtension().lastPathComponent
-                    let meta = AppStore.extractCookieMetadata(fileName: baseName, path: fileURL.path)
-                    let file = CookieFile(
-                        name: baseName,
-                        path: fileURL.path,
-                        format: format,
-                        cookies: cookies,
-                        folderName: folderName,
-                        tier: meta.tier,
-                        accountEmail: meta.email,
-                        planName: meta.plan,
-                        serviceName: meta.service
-                    )
-                    newCookieFiles.append(file)
-                    importedCookiesCount += cookies.count
-                }
-            } else {
-                let lines = content.components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                if !lines.isEmpty {
-                    let serviceName = fileURL.deletingPathExtension().lastPathComponent.lowercased()
-                    let info = serviceInfo(for: serviceName)
-                    let keys = lines.map { APIKey(value: $0) }
-                    let file = APIKeyFile(
-                        service: serviceName,
-                        displayName: info.displayName,
-                        icon: info.icon,
-                        keys: keys,
-                        checkEndpoint: info.endpoint,
-                        folderName: folderName
-                    )
-                    newAPIKeyFiles.append(file)
-                    importedKeysCount += keys.count
+        isIndexing = true
+        Task.detached(priority: .userInitiated) { [self] in
+            let batch = await parseFilesConcurrently(fileURLs, folderName: folderName, tab: tab)
+            await MainActor.run {
+                commitImportedBatch(batch, folderName: folderName)
+                isIndexing = false
+                let totalFiles = batch.cookies.count + batch.apis.count
+                if totalFiles > 0 {
+                    showToast("Imported folder \"\(folderName)\": \(totalFiles) files", type: .success)
+                } else {
+                    showToast("No text or JSON files found in \"\(folderName)\"", type: .warning)
                 }
             }
-        }
-
-        if !newCookieFiles.isEmpty {
-            cookieFiles.append(contentsOf: newCookieFiles)
-            indexNewCookies(newCookieFiles)
-            selectedCookieFolder = folderName
-            selectedCookieFile = newCookieFiles.first
-            expandedFolders.insert("c_\(folderName)")
-        }
-        if !newAPIKeyFiles.isEmpty {
-            apiKeyFiles.append(contentsOf: newAPIKeyFiles)
-            selectedAPIFolder = folderName
-            selectedAPIFile = newAPIKeyFiles.first
-            expandedFolders.insert("a_\(folderName)")
-        }
-
-        save()
-
-        let totalFiles = newCookieFiles.count + newAPIKeyFiles.count
-        if totalFiles > 0 {
-            showToast("Imported folder \"\(folderName)\": \(totalFiles) files", type: .success)
-        } else {
-            showToast("No text or JSON files found in \"\(folderName)\"", type: .warning)
         }
     }
 
-    // MARK: - Zip Import Engine (Recursive)
+    /// Commit a background-parsed batch on the main actor: append models, merge the
+    /// precomputed caches (no re-classification on main), reindex once, select, save.
+    @MainActor
+    private func commitImportedBatch(_ batch: ParsedBatch, folderName: String) {
+        if !batch.cookies.isEmpty {
+            cookieFiles.append(contentsOf: batch.cookies)
+            for (id, st) in batch.states { stateCache[id] = st }
+            for (id, m) in batch.metrics { metricsCache[id] = m }
+            rebuildSiteIndex()
+            selectedCookieFolder = folderName
+            selectedCookieFile = batch.cookies.first
+            expandedFolders.insert("c_\(folderName)")
+        }
+        if !batch.apis.isEmpty {
+            apiKeyFiles.append(contentsOf: batch.apis)
+            selectedAPIFolder = folderName
+            selectedAPIFile = batch.apis.first
+            expandedFolders.insert("a_\(folderName)")
+        }
+        save()
+    }
+
+    // MARK: - Zip Import Engine (Recursive, off-main + concurrent)
     public func importZip(from url: URL, parentFolder: String? = nil, targetTab: AppTab? = nil) {
         let zipName = parentFolder ?? url.deletingPathExtension().lastPathComponent
-        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("cv_zip_\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        task.arguments = ["-q", "-o", url.path, "-d", tmpDir.path]
-        try? task.run()
-        task.waitUntilExit()
-
-        // Recursively read extracted contents
-        let fm = FileManager.default
         let tab = targetTab ?? currentTab
+        isIndexing = true
 
-        guard let enumerator = fm.enumerator(at: tmpDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+        Task.detached(priority: .userInitiated) { [self] in
+            let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("cv_zip_\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            task.arguments = ["-q", "-o", url.path, "-d", tmpDir.path]
+            try? task.run()
+            task.waitUntilExit()
+
+            let fm = FileManager.default
+            guard let enumerator = fm.enumerator(at: tmpDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+                try? fm.removeItem(at: tmpDir)
+                await MainActor.run { isIndexing = false }
+                return
+            }
+
+            var fileURLs: [URL] = []
+            var nestedZips: [(URL, String)] = []
+            while let obj = enumerator.nextObject() {
+                guard let fileURL = obj as? URL else { continue }
+                guard let isRegular = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile, isRegular else { continue }
+                let ext = fileURL.pathExtension.lowercased()
+                if ext == "zip" {
+                    nestedZips.append((fileURL, "\(zipName)/\(fileURL.deletingPathExtension().lastPathComponent)"))
+                    continue
+                }
+                guard ext == "txt" || ext == "json" else { continue }
+                fileURLs.append(fileURL)
+            }
+
+            let batch = await parseFilesConcurrently(fileURLs, folderName: zipName, tab: tab)
+
+            await MainActor.run {
+                commitImportedBatch(batch, folderName: zipName)
+                isIndexing = false
+                let totalFiles = batch.cookies.count + batch.apis.count
+                if totalFiles > 0 { showToast("Imported \"\(zipName)\": \(totalFiles) files", type: .success) }
+            }
+
+            // Copy nested zips out to their own temp files BEFORE deleting tmpDir, so the
+            // (async) nested imports don't race the cleanup below and read a deleted file.
+            for (nz, name) in nestedZips {
+                let copy = FileManager.default.temporaryDirectory.appendingPathComponent("cv_nested_\(UUID().uuidString).zip")
+                if (try? fm.copyItem(at: nz, to: copy)) != nil {
+                    await MainActor.run { importZip(from: copy, parentFolder: name, targetTab: tab) }
+                }
+            }
             try? fm.removeItem(at: tmpDir)
-            return
-        }
-
-        var newCookieFiles: [CookieFile] = []
-        var newAPIKeyFiles: [APIKeyFile] = []
-
-        for case let fileURL as URL in enumerator {
-            guard let isRegular = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile, isRegular else {
-                continue
-            }
-            let ext = fileURL.pathExtension.lowercased()
-
-            // Handle nested zips inside the zip (e.g. SimpleChecker)
-            if ext == "zip" {
-                let nestedName = "\(zipName)/\(fileURL.deletingPathExtension().lastPathComponent)"
-                importZip(from: fileURL, parentFolder: nestedName, targetTab: tab)
-                continue
-            }
-
-            guard ext == "txt" || ext == "json" else { continue }
-            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
-
-            let isCookie = isCookieContent(content)
-
-            if tab == .cookies || isCookie {
-                let format = detectFormat(content)
-                let cookies = parseCookies(content: content, format: format)
-                if !cookies.isEmpty {
-                    let baseName = fileURL.deletingPathExtension().lastPathComponent
-                    let meta = AppStore.extractCookieMetadata(fileName: baseName, path: fileURL.path)
-                    let file = CookieFile(
-                        name: baseName,
-                        path: fileURL.path,
-                        format: format,
-                        cookies: cookies,
-                        folderName: zipName,
-                        tier: meta.tier,
-                        accountEmail: meta.email,
-                        planName: meta.plan,
-                        serviceName: meta.service
-                    )
-                    newCookieFiles.append(file)
-                }
-            } else {
-                let lines = content.components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                if !lines.isEmpty {
-                    let serviceName = fileURL.deletingPathExtension().lastPathComponent.lowercased()
-                    let info = serviceInfo(for: serviceName)
-                    let keys = lines.map { APIKey(value: $0) }
-                    let file = APIKeyFile(
-                        service: serviceName,
-                        displayName: info.displayName,
-                        icon: info.icon,
-                        keys: keys,
-                        checkEndpoint: info.endpoint,
-                        folderName: zipName
-                    )
-                    newAPIKeyFiles.append(file)
-                }
-            }
-        }
-
-        if !newCookieFiles.isEmpty {
-            cookieFiles.append(contentsOf: newCookieFiles)
-            indexNewCookies(newCookieFiles)
-            selectedCookieFolder = zipName
-            selectedCookieFile = newCookieFiles.first
-            expandedFolders.insert("c_\(zipName)")
-        }
-        if !newAPIKeyFiles.isEmpty {
-            apiKeyFiles.append(contentsOf: newAPIKeyFiles)
-            selectedAPIFolder = zipName
-            selectedAPIFile = newAPIKeyFiles.first
-            expandedFolders.insert("a_\(zipName)")
-        }
-
-        try? fm.removeItem(at: tmpDir)
-        save()
-
-        let totalFiles = newCookieFiles.count + newAPIKeyFiles.count
-        if totalFiles > 0 {
-            showToast("Imported \"\(zipName)\": \(totalFiles) files", type: .success)
         }
     }
 
@@ -1252,35 +1231,23 @@ public class AppStore: ObservableObject {
     @MainActor
     public func checkKeys(_ ids: Set<UUID>, in file: APIKeyFile) async {
         guard let idx = apiKeyFiles.firstIndex(where: { $0.id == file.id }) else { return }
-        let targets = apiKeyFiles[idx].keys.filter { ids.contains($0.id) }
+        let targets = apiKeyFiles[idx].keys.filter { ids.contains($0.id) }.map {
+            CheckTarget(id: $0.id, value: $0.value, service: file.service, endpoint: file.checkEndpoint)
+        }
         guard !targets.isEmpty else { return }
         isBatchChecking = true
         batchCheckProgress = 0
         batchCheckCurrentTask = "Checking \(targets.count) selected…"
-        let service = file.service, endpoint = file.checkEndpoint
-        var done = 0
-        for chunk in targets.chunked(into: 24) {
-            await withTaskGroup(of: (UUID, APIKeyChecker.CheckResult).self) { group in
-                for key in chunk {
-                    group.addTask { (key.id, await APIKeyChecker.check(key: key.value, service: service, endpoint: endpoint)) }
-                }
-                for await (kid, res) in group {
-                    done += 1
-                    if let fIdx = self.apiKeyFiles.firstIndex(where: { $0.id == file.id }),
-                       let kIdx = self.apiKeyFiles[fIdx].keys.firstIndex(where: { $0.id == kid }) {
-                        self.apiKeyFiles[fIdx].keys[kIdx].status = res.status
-                        self.apiKeyFiles[fIdx].keys[kIdx].responseSnippet = res.snippet
-                        self.apiKeyFiles[fIdx].keys[kIdx].details = res.details
-                        self.apiKeyFiles[fIdx].keys[kIdx].checkedAt = Date()
-                    }
-                    batchCheckProgress = Double(done) / Double(targets.count)
-                }
-            }
+
+        let locations = makeKeyLocationMap()
+        await streamCheck(targets) { [weak self] kid, res, done, total in
+            self?.applyResult(kid, res, locations)
+            self?.batchCheckProgress = Double(done) / Double(total)
         }
         isBatchChecking = false
         batchCheckProgress = 1
         save()
-        showToast("Checked \(done) selected key\(done == 1 ? "" : "s")", type: .success)
+        showToast("Checked \(targets.count) selected key\(targets.count == 1 ? "" : "s")", type: .success)
     }
 
     /// QoL: check only keys that have never been checked (idle) in a file — much faster on re-runs.
@@ -1627,6 +1594,35 @@ public class AppStore: ObservableObject {
     }
 
     // MARK: - API Key Checking (Single & Concurrent Batch)
+
+    struct CheckTarget { let id: UUID; let value: String; let service: String; let endpoint: String? }
+
+    /// Streaming bounded-concurrency runner: keeps `maxConcurrent` checks in flight at all times
+    /// (no per-chunk barrier, so one slow/dead key never stalls the rest). `onEach` runs on the
+    /// main actor as each result lands.
+    @MainActor
+    private func streamCheck(_ targets: [CheckTarget], maxConcurrent: Int = 40,
+                             onEach: @escaping (UUID, APIKeyChecker.CheckResult, _ done: Int, _ total: Int) -> Void) async {
+        let total = targets.count
+        guard total > 0 else { return }
+        await withTaskGroup(of: (UUID, APIKeyChecker.CheckResult).self) { group in
+            var next = 0                                  // index of the next target to launch
+            func launch() {
+                guard next < targets.count else { return }
+                let t = targets[next]; next += 1
+                let id = t.id, value = t.value, service = t.service, endpoint = t.endpoint
+                group.addTask { (id, await APIKeyChecker.check(key: value, service: service, endpoint: endpoint)) }
+            }
+            for _ in 0..<min(maxConcurrent, total) { launch() }
+            var done = 0
+            while let (id, res) = await group.next() {
+                done += 1
+                onEach(id, res, done, total)
+                launch()                                  // keep the window full
+            }
+        }
+    }
+
     @MainActor
     public func checkKey(_ key: APIKey, in file: APIKeyFile) async {
         guard let idx = apiKeyFiles.firstIndex(where: { $0.id == file.id }),
@@ -1651,50 +1647,28 @@ public class AppStore: ObservableObject {
     @MainActor
     public func checkAllKeys(in file: APIKeyFile, limit: Int = Int.max) async {
         guard let fIdx = apiKeyFiles.firstIndex(where: { $0.id == file.id }) else { return }
-        let targetKeys = Array(apiKeyFiles[fIdx].keys.prefix(limit))
-        let total = targetKeys.count
-        guard total > 0 else { return }
+        let fileId = file.id
+        let targets = apiKeyFiles[fIdx].keys.prefix(limit).map {
+            CheckTarget(id: $0.id, value: $0.value, service: file.service, endpoint: file.checkEndpoint)
+        }
+        guard !targets.isEmpty else { return }
 
         isBatchChecking = true
         batchCheckProgress = 0.0
         batchCheckCurrentTask = "Checking \(file.displayName)..."
 
-        var checkedCount = 0
-        let service = file.service
-        let endpoint = file.checkEndpoint
-
-        var keyIndexMap: [UUID: Int] = [:]
-        for (kIdx, k) in apiKeyFiles[fIdx].keys.enumerated() {
-            keyIndexMap[k.id] = kIdx
-        }
-
-        for chunk in targetKeys.chunked(into: 24) {
-            await withTaskGroup(of: (UUID, APIKeyChecker.CheckResult).self) { group in
-                for key in chunk {
-                    group.addTask {
-                        let res = await APIKeyChecker.check(key: key.value, service: service, endpoint: endpoint)
-                        return (key.id, res)
-                    }
-                }
-                for await (keyId, res) in group {
-                    checkedCount += 1
-                    if let kIdx = keyIndexMap[keyId] {
-                        self.apiKeyFiles[fIdx].keys[kIdx].status = res.status
-                        self.apiKeyFiles[fIdx].keys[kIdx].responseSnippet = res.snippet
-                        self.apiKeyFiles[fIdx].keys[kIdx].details = res.details
-                        self.apiKeyFiles[fIdx].keys[kIdx].checkedAt = Date()
-                    }
-                }
-            }
-            batchCheckProgress = Double(checkedCount) / Double(total)
+        let locations = makeKeyLocationMap()
+        await streamCheck(Array(targets)) { [weak self] id, res, done, total in
+            self?.applyResult(id, res, locations)
+            self?.batchCheckProgress = Double(done) / Double(total)
         }
 
         isBatchChecking = false
         batchCheckProgress = 1.0
         save()
 
-        let validCount = apiKeyFiles[fIdx].keys.filter { $0.status == .valid }.count
-        showToast("Checked \(checkedCount) keys in \(file.displayName) (\(validCount) valid)", type: .success)
+        let validCount = apiKeyFiles.first(where: { $0.id == fileId })?.keys.filter { $0.status == .valid }.count ?? 0
+        showToast("Checked \(targets.count) keys in \(file.displayName) (\(validCount) valid)", type: .success)
     }
 
     // Concurrent check across ALL files in a Folder
@@ -1705,98 +1679,73 @@ public class AppStore: ObservableObject {
 
         isBatchChecking = true
         batchCheckProgress = 0.0
+        batchCheckCurrentTask = "Checking folder \"\(folderName)\"…"
 
-        var totalKeys = 0
-        for f in files { totalKeys += min(f.keys.count, 50) }
-        var completedKeys = 0
-
-        for file in files {
-            guard let fIdx = apiKeyFiles.firstIndex(where: { $0.id == file.id }) else { continue }
-            batchCheckCurrentTask = "Checking \(file.displayName)..."
-            let targetKeys = Array(apiKeyFiles[fIdx].keys)
-            let service = file.service
-            let endpoint = file.checkEndpoint
-
-            var keyIndexMap: [UUID: Int] = [:]
-            for (kIdx, k) in apiKeyFiles[fIdx].keys.enumerated() {
-                keyIndexMap[k.id] = kIdx
-            }
-
-            for chunk in targetKeys.chunked(into: 24) {
-                await withTaskGroup(of: (UUID, APIKeyChecker.CheckResult).self) { group in
-                    for key in chunk {
-                        group.addTask {
-                            let res = await APIKeyChecker.check(key: key.value, service: service, endpoint: endpoint)
-                            return (key.id, res)
-                        }
-                    }
-                    for await (keyId, res) in group {
-                        completedKeys += 1
-                        if let kIdx = keyIndexMap[keyId] {
-                            self.apiKeyFiles[fIdx].keys[kIdx].status = res.status
-                            self.apiKeyFiles[fIdx].keys[kIdx].responseSnippet = res.snippet
-                            self.apiKeyFiles[fIdx].keys[kIdx].details = res.details
-                            self.apiKeyFiles[fIdx].keys[kIdx].checkedAt = Date()
-                        }
-                    }
-                }
-                batchCheckProgress = totalKeys > 0 ? Double(completedKeys) / Double(totalKeys) : 1.0
-            }
+        // Flatten every key across the folder's files into one stream — a slow provider
+        // no longer blocks the others, and all hosts saturate in parallel.
+        let targets: [CheckTarget] = files.flatMap { f in
+            f.keys.map { CheckTarget(id: $0.id, value: $0.value, service: f.service, endpoint: f.checkEndpoint) }
+        }
+        let locations = makeKeyLocationMap()
+        await streamCheck(targets) { [weak self] id, res, done, total in
+            self?.applyResult(id, res, locations)
+            self?.batchCheckProgress = Double(done) / Double(total)
         }
 
         isBatchChecking = false
         batchCheckProgress = 1.0
         save()
-        showToast("Folder \"\(folderName)\" check completed (\(completedKeys) keys checked)", type: .success)
+        let valid = files.compactMap { f in apiKeyFiles.first(where: { $0.id == f.id }) }
+            .reduce(0) { $0 + $1.keys.filter { $0.status == .valid }.count }
+        showToast("Folder \"\(folderName)\" checked (\(targets.count) keys · \(valid) valid)", type: .success)
     }
 
-    // Concurrent check across EVERY API-key file.
+    /// keyId → (owning fileId, key index). Key order within a file never changes during a
+    /// check, so the index stays valid; we still verify the id at that slot before writing.
+    @MainActor
+    private func makeKeyLocationMap() -> [UUID: (UUID, Int)] {
+        var map: [UUID: (UUID, Int)] = [:]
+        for f in apiKeyFiles {
+            for (ki, k) in f.keys.enumerated() { map[k.id] = (f.id, ki) }
+        }
+        return map
+    }
+
+    /// Apply a check result in O(1)-ish time using the prebuilt location map.
+    @MainActor
+    private func applyResult(_ id: UUID, _ res: APIKeyChecker.CheckResult, _ map: [UUID: (UUID, Int)]) {
+        guard let (fileId, ki) = map[id],
+              let fi = apiKeyFiles.firstIndex(where: { $0.id == fileId }),
+              ki < apiKeyFiles[fi].keys.count,
+              apiKeyFiles[fi].keys[ki].id == id else { return }
+        apiKeyFiles[fi].keys[ki].status = res.status
+        apiKeyFiles[fi].keys[ki].responseSnippet = res.snippet
+        apiKeyFiles[fi].keys[ki].details = res.details
+        apiKeyFiles[fi].keys[ki].checkedAt = Date()
+    }
+
+    // Concurrent check across EVERY API-key file (all flattened into one stream).
     @MainActor
     public func checkAllAPIKeys(limitPerFile: Int = Int.max) async {
         guard !apiKeyFiles.isEmpty else { return }
         isBatchChecking = true
         batchCheckProgress = 0.0
+        batchCheckCurrentTask = "Checking all keys…"
 
-        let fileIds = apiKeyFiles.map { $0.id }
-        var totalKeys = 0
-        for f in apiKeyFiles { totalKeys += min(f.keys.count, limitPerFile) }
-        var completedKeys = 0
-
-        for fid in fileIds {
-            guard let fIdx = apiKeyFiles.firstIndex(where: { $0.id == fid }) else { continue }
-            let file = apiKeyFiles[fIdx]
-            batchCheckCurrentTask = "Checking \(file.displayName)…"
-            let targetKeys = Array(apiKeyFiles[fIdx].keys.prefix(limitPerFile))
-            let service = file.service
-            let endpoint = file.checkEndpoint
-            var keyIndexMap: [UUID: Int] = [:]
-            for (kIdx, k) in apiKeyFiles[fIdx].keys.enumerated() { keyIndexMap[k.id] = kIdx }
-
-            for chunk in targetKeys.chunked(into: 24) {
-                await withTaskGroup(of: (UUID, APIKeyChecker.CheckResult).self) { group in
-                    for key in chunk {
-                        group.addTask { (key.id, await APIKeyChecker.check(key: key.value, service: service, endpoint: endpoint)) }
-                    }
-                    for await (keyId, res) in group {
-                        completedKeys += 1
-                        if let curIdx = self.apiKeyFiles.firstIndex(where: { $0.id == fid }),
-                           let kIdx = keyIndexMap[keyId], kIdx < self.apiKeyFiles[curIdx].keys.count {
-                            self.apiKeyFiles[curIdx].keys[kIdx].status = res.status
-                            self.apiKeyFiles[curIdx].keys[kIdx].responseSnippet = res.snippet
-                            self.apiKeyFiles[curIdx].keys[kIdx].details = res.details
-                            self.apiKeyFiles[curIdx].keys[kIdx].checkedAt = Date()
-                        }
-                    }
-                }
-                batchCheckProgress = totalKeys > 0 ? Double(completedKeys) / Double(totalKeys) : 1.0
-            }
+        let targets: [CheckTarget] = apiKeyFiles.flatMap { f in
+            f.keys.prefix(limitPerFile).map { CheckTarget(id: $0.id, value: $0.value, service: f.service, endpoint: f.checkEndpoint) }
+        }
+        let locations = makeKeyLocationMap()
+        await streamCheck(targets, maxConcurrent: 48) { [weak self] id, res, done, total in
+            self?.applyResult(id, res, locations)
+            self?.batchCheckProgress = Double(done) / Double(total)
         }
 
         isBatchChecking = false
         batchCheckProgress = 1.0
         save()
         let valid = apiKeyFiles.reduce(0) { $0 + $1.keys.filter { $0.status == .valid }.count }
-        showToast("Checked \(completedKeys) keys across \(apiKeyFiles.count) files (\(valid) valid)", type: .success)
+        showToast("Checked \(targets.count) keys across \(apiKeyFiles.count) files (\(valid) valid)", type: .success)
     }
 
     /// Export every valid key across all files to one .txt.
@@ -1975,7 +1924,30 @@ public class AppStore: ObservableObject {
             "apify":                .init(displayName: "Apify",               icon: "gearshape.2.fill", endpoint: nil),
             "capsolver":            .init(displayName: "CapSolver",           icon: "shield.lefthalf.filled", endpoint: nil),
             "riot":                 .init(displayName: "Riot Games",          icon: "gamecontroller", endpoint: nil),
-            "spotify":              .init(displayName: "Spotify API",         icon: "music.note.list", endpoint: nil)
+            "spotify":              .init(displayName: "Spotify API",         icon: "music.note.list", endpoint: nil),
+
+            // Observability / misc (were falling back to a generic icon)
+            "datadog":              .init(displayName: "Datadog",             icon: "pawprint.fill", endpoint: nil),
+            "digitalocean":         .init(displayName: "DigitalOcean",        icon: "drop.fill", endpoint: nil),
+            "heroku":               .init(displayName: "Heroku",              icon: "square.stack.3d.up.fill", endpoint: nil),
+            "newrelic":             .init(displayName: "New Relic",           icon: "chart.line.uptrend.xyaxis", endpoint: nil),
+            "npm":                  .init(displayName: "npm",                 icon: "shippingbox.fill", endpoint: nil),
+            "firecrawl":            .init(displayName: "Firecrawl",           icon: "flame", endpoint: nil),
+            "jina":                 .init(displayName: "Jina AI",             icon: "j.circle.fill", endpoint: nil),
+            "openai_asst":          .init(displayName: "OpenAI Assistants",   icon: "brain.head.profile", endpoint: nil),
+            "all_discord_tokens":   .init(displayName: "Discord Tokens",      icon: "gamecontroller.fill", endpoint: nil),
+            "valid_discord_tokens": .init(displayName: "Discord Tokens (Valid)", icon: "gamecontroller.fill", endpoint: nil),
+            "discord_user":         .init(displayName: "Discord User Token",  icon: "person.crop.circle.fill", endpoint: nil),
+
+            // New batch
+            "cloudflare":           .init(displayName: "Cloudflare",          icon: "cloud.bolt.fill", endpoint: nil),
+            "databricks":           .init(displayName: "Databricks",          icon: "square.grid.3x3.fill", endpoint: nil),
+            "azure_storage":        .init(displayName: "Azure Storage",       icon: "externaldrive.fill.badge.icloud", endpoint: nil),
+            "brightdata":           .init(displayName: "Bright Data",         icon: "network", endpoint: nil),
+            "mongodb_atlas":        .init(displayName: "MongoDB Atlas",       icon: "leaf.circle.fill", endpoint: nil),
+            "nuget":                .init(displayName: "NuGet",               icon: "cube.box.fill", endpoint: nil),
+            "pubnub":               .init(displayName: "PubNub",              icon: "dot.radiowaves.left.and.right", endpoint: nil),
+            "pypi":                 .init(displayName: "PyPI",                icon: "cube.transparent.fill", endpoint: nil)
         ]
 
         return map[s] ?? .init(displayName: s.replacingOccurrences(of: "_", with: " ").capitalized, icon: "key.fill", endpoint: nil)

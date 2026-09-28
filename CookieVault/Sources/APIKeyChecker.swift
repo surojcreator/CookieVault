@@ -9,8 +9,9 @@ public enum APIKeyChecker {
     // checks of the same provider don't serialize on URLSession's default 6-per-host cap.
     static let session: URLSession = {
         let cfg = URLSessionConfiguration.default
-        cfg.httpMaximumConnectionsPerHost = 24
-        cfg.timeoutIntervalForRequest = 9
+        cfg.httpMaximumConnectionsPerHost = 32
+        cfg.timeoutIntervalForRequest = 8
+        cfg.timeoutIntervalForResource = 12
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: cfg)
@@ -84,6 +85,14 @@ public enum APIKeyChecker {
         case "neon", "supabase", "pinecone", "airtable_meta": return mk("Database / Backend", "Managed DB / vector store key.", ["Project", "Region", "Plan"])
         case "mapbox": return mk("Maps / Geo", "Mapbox token.", ["Account", "Scopes"])
         case "spotify": return mk("Media", "Spotify API credential.", ["Token type", "Scopes"])
+        case "cloudflare": return mk("Cloud / CDN", "Cloudflare API token — DNS, Workers, zones.", ["Token status", "Token ID", "Latency"])
+        case "databricks": return mk("Data / ML", "Databricks personal access token.", ["Token type", "Workspace (needs host)"])
+        case "azure_storage": return mk("Cloud / Storage", "Azure Storage connection string or account key.", ["Account name", "Endpoint suffix"])
+        case "brightdata": return mk("Proxy / Scraping", "Bright Data API token.", ["Token format"])
+        case "mongodb_atlas": return mk("Database", "MongoDB Atlas Admin API key pair.", ["Public key", "public:private pair"])
+        case "nuget": return mk("Package Registry", "NuGet push API key.", ["Token format"])
+        case "pubnub": return mk("Realtime / Messaging", "PubNub pub/sub/secret key.", ["Key role (pub/sub/secret)"])
+        case "pypi": return mk("Package Registry", "PyPI upload token.", ["Token format"])
         case "twilio_verify": return mk("Comms", "Twilio verify key.", ["Account", "Status"])
         default:
             return mk("API Key", "Third-party API credential.", ["Validity", "HTTP status", "Latency", "Any returned account detail"])
@@ -127,7 +136,11 @@ public enum APIKeyChecker {
             "aws_access_key": "https://console.aws.amazon.com/iam/home#/security_credentials",
             "cloudflare": "https://dash.cloudflare.com/profile/api-tokens", "pagerduty": "https://app.pagerduty.com",
             "docker": "https://hub.docker.com/settings/security", "npm": "https://www.npmjs.com/settings/~/tokens",
-            "facebook": "https://developers.facebook.com/tools/accesstoken/", "riot": "https://developer.riotgames.com"
+            "facebook": "https://developers.facebook.com/tools/accesstoken/", "riot": "https://developer.riotgames.com",
+            "databricks": "https://accounts.cloud.databricks.com", "azure_storage": "https://portal.azure.com",
+            "brightdata": "https://brightdata.com/cp/setting", "mongodb_atlas": "https://cloud.mongodb.com",
+            "nuget": "https://www.nuget.org/account/apikeys", "pubnub": "https://admin.pubnub.com",
+            "pypi": "https://pypi.org/manage/account/token/"
         ]
         return map[s]
     }
@@ -398,6 +411,16 @@ public enum APIKeyChecker {
         case "firecrawl":     return await checkFirecrawl(key: trimmedKey)
         case "jina":          return await checkJina(key: trimmedKey)
         case "openai_asst":   return await checkOpenAI(key: trimmedKey)
+
+        // --- New types (this batch) ---
+        case "cloudflare":    return await checkCloudflare(key: trimmedKey)
+        case "databricks":    return checkDatabricks(key: trimmedKey)
+        case "azure_storage": return checkAzureStorage(key: trimmedKey)
+        case "brightdata":    return checkBrightData(key: trimmedKey)
+        case "mongodb_atlas": return checkMongoAtlas(key: trimmedKey)
+        case "nuget":         return checkNuGet(key: trimmedKey)
+        case "pubnub":        return checkPubNub(key: trimmedKey)
+        case "pypi":          return checkPyPI(key: trimmedKey)
         case "all_discord_tokens", "valid_discord_tokens", "discord_user":
             return await checkDiscordUser(key: trimmedKey)
 
@@ -583,6 +606,97 @@ public enum APIKeyChecker {
         } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
     }
 
+    // MARK: - New-batch checkers
+
+    // Cloudflare — official token-verify endpoint (live check).
+    private static func checkCloudflare(key: String) async -> CheckResult {
+        guard let url = URL(string: "https://api.cloudflare.com/client/v4/user/tokens/verify") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            var d = KeyDetails(); d.latencyMs = latency; d.httpCode = code
+            d.rawSnippet = String(data: data.prefix(600), encoding: .utf8)
+            if code == 200, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               (j["success"] as? Bool) == true, let res = j["result"] as? [String: Any] {
+                let status = (res["status"] as? String ?? "active").capitalized
+                d.planOrTier = "Token \(status)"
+                if let id = res["id"] as? String { d.accountName = "Token \(id.prefix(8))…" }
+                let expired = status.lowercased() != "active"
+                return CheckResult(status: expired ? .invalid : .valid,
+                                   snippet: "Cloudflare token \(status)", details: d)
+            }
+            if code == 401 || code == 403 { return CheckResult(status: .invalid, snippet: "Invalid Cloudflare token (HTTP \(code))") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
+    }
+
+    // Databricks — needs the workspace host for a live call, so format-only (dapi… PAT).
+    private static func checkDatabricks(key: String) -> CheckResult {
+        let type = key.hasPrefix("dapi") ? "Personal Access Token" : "Token"
+        return formatOnly("Databricks \(type)", key: key, minLen: 20,
+                          extra: "Databricks \(type) (needs workspace host for live check)")
+    }
+
+    // Azure Storage — connection string or account key; parse the account name out.
+    private static func checkAzureStorage(key: String) -> CheckResult {
+        var details = KeyDetails()
+        if key.contains("AccountName=") {
+            let parts = key.components(separatedBy: ";")
+            let name = parts.first(where: { $0.hasPrefix("AccountName=") })?.replacingOccurrences(of: "AccountName=", with: "")
+            let suffix = parts.first(where: { $0.hasPrefix("EndpointSuffix=") })?.replacingOccurrences(of: "EndpointSuffix=", with: "")
+            details.accountName = name
+            details.planOrTier = "Storage Connection String"
+            details.balanceOrQuota = suffix.map { "Endpoint: \($0)" }
+            return CheckResult(status: .valid, snippet: "Valid Azure Storage connection (\(name ?? "account"))", details: details)
+        }
+        // Bare account key (base64, typically 88 chars ending "==").
+        return formatOnly("Azure Storage Account Key", key: key, minLen: 40)
+    }
+
+    // Bright Data — proxy/API token (UUID-shaped); no reliable public verify endpoint.
+    private static func checkBrightData(key: String) -> CheckResult {
+        return formatOnly("Bright Data API Token", key: key, minLen: 20)
+    }
+
+    // MongoDB Atlas — Admin API uses HTTP-Digest with a public:private key pair.
+    private static func checkMongoAtlas(key: String) -> CheckResult {
+        let parts = key.components(separatedBy: ":")
+        var details = KeyDetails()
+        details.planOrTier = "Atlas Admin API Key"
+        if parts.count == 2 {
+            details.accountName = "Public: \(parts[0])"
+            details.balanceOrQuota = "public:private pair"
+            return CheckResult(status: .valid, snippet: "Valid Atlas API key pair (\(parts[0].prefix(8))…)", details: details)
+        }
+        return formatOnly("MongoDB Atlas Key", key: key, minLen: 8)
+    }
+
+    // NuGet — API key used only on push; no validation endpoint.
+    private static func checkNuGet(key: String) -> CheckResult {
+        return formatOnly("NuGet API Key", key: key, minLen: 16)
+    }
+
+    // PubNub — pub-c-… / sub-c-… key set.
+    private static func checkPubNub(key: String) -> CheckResult {
+        var details = KeyDetails()
+        details.planOrTier = "PubNub Key"
+        if key.hasPrefix("pub-c-") { details.planOrTier = "Publish Key" }
+        else if key.hasPrefix("sub-c-") { details.planOrTier = "Subscribe Key" }
+        else if key.hasPrefix("sec-c-") { details.planOrTier = "Secret Key" }
+        return formatOnly("PubNub \(details.planOrTier ?? "Key")", key: key, minLen: 20)
+    }
+
+    // PyPI — upload token (pypi-…); validated only on publish.
+    private static func checkPyPI(key: String) -> CheckResult {
+        return formatOnly("PyPI Upload Token", key: key, minLen: 16)
+    }
+
     // MARK: - Auto-Detection
     public static func detectService(key: String, declaredService: String) -> String {
         let s = declaredService.lowercased()
@@ -616,6 +730,10 @@ public enum APIKeyChecker {
         if key.hasPrefix("secret_") { return "notion" }
         if key.hasPrefix("pat.") { return "airtable" }
         if key.hasPrefix("xoxb-") || key.hasPrefix("xoxp-") || key.hasPrefix("xapp-") { return "slack" }
+        if key.hasPrefix("dapi") { return "databricks" }
+        if key.hasPrefix("pypi-") { return "pypi" }
+        if key.hasPrefix("pub-c-") || key.hasPrefix("sub-c-") || key.hasPrefix("sec-c-") { return "pubnub" }
+        if key.contains("AccountName=") && key.contains("AccountKey=") { return "azure_storage" }
         if key.contains(":") && key.split(separator: ":").first?.allSatisfy({ $0.isNumber }) == true {
             return "telegram_bot"
         }
@@ -821,7 +939,7 @@ public enum APIKeyChecker {
 
         let start = Date()
         do {
-            let (data, response) = try await APIKeyChecker.session.data(for: req)
+            let (_, response) = try await APIKeyChecker.session.data(for: req)
             let latency = Int(Date().timeIntervalSince(start) * 1000)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200 {
