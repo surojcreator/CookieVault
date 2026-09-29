@@ -41,10 +41,25 @@ public enum PlanClassifier {
     ]
     private static let freeWords: Set<String> = ["free", "none", "na", "n/a", "nosub", "basic", "starter", "trial"]
 
-    public static func classify(service: String, name: String) -> (tier: AccountTier, plan: String?, state: AccountState) {
+    /// `folderHint` is the tier subfolder the account came from in the source archive
+    /// (e.g. "Premium", "Standard with ads", "Prime_NoSub_Unknown", "Semrush_Pro"). It's the
+    /// most authoritative plan signal — it's exactly how the file organizes the accounts — so
+    /// we fold it into the tokens the per-service rules already reason over.
+    public static func classify(service: String, name: String, folderHint: String? = nil) -> (tier: AccountTier, plan: String?, state: AccountState) {
         let svc = service.lowercased()
-        let lname = name.lowercased()
-        let tokens = bracketTokens(name).map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+        var lname = name.lowercased()
+        var tokens = bracketTokens(name).map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+
+        if let hint = folderHint?.lowercased().trimmingCharacters(in: .whitespaces), !hint.isEmpty {
+            // Drop a leading service-name component ("semrush_pro" → "pro", "grok_supergrok" →
+            // "supergrok", "prime_premium" → "premium") but keep multi-word plans intact.
+            let comps = hint.split(whereSeparator: { $0 == "_" }).map(String.init)
+            let plan = comps.count > 1 && svc.contains(comps[0]) ? comps.dropFirst().joined(separator: "_") : hint
+            // Feed the plan token whole (so "standard with ads" → firstWord "standard") and split.
+            tokens.append(plan)
+            tokens.append(contentsOf: plan.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init))
+            lname += " " + hint
+        }
 
         let state = detectState(tokens: tokens, lname: lname)
         var (tier, plan) = classifyPlan(svc: svc, tokens: tokens, lname: lname, state: state)
@@ -121,10 +136,11 @@ public enum PlanClassifier {
         }
         if svc.contains("prime video") || svc.contains("primevideo") {
             if state == .noSub { return (.free, "No sub") }
+            if hasFree() { return (.free, "Free") }   // the archive explicitly bucketed it as Prime_Free
             if let p = firstPremium() { return (.premium, prettyPlan(p)) }
             return (.premium, "Prime") // a live Prime Video session implies an active Prime sub
         }
-        if svc.contains("plex") {
+        if svc.contains("plex") && !svc.contains("perplex") {   // guard: "perplexity" contains "plex"
             if has("lifetime") || has("∞") { return (.premium, "Lifetime") }
             if firstPremium() != nil || has("monthly") || has("yearly") || has("plex") { return (.premium, "Plex Pass") }
             if hasFree() { return (.free, "Free") }
@@ -188,7 +204,7 @@ public enum PlanClassifier {
         if svc.contains("krea") {
             // "monthly"/"yearly" here is the billing cycle (present even on free); check free first.
             if hasFree() { return (.free, "Free") }
-            if tokens.contains(where: { ["pro", "max", "basic"].contains(firstWord($0)) || $0.hasPrefix("creator_") }) { return (.premium, "Paid") }
+            if tokens.contains(where: { ["pro", "max", "basic", "premium", "plus"].contains(firstWord($0)) || $0.hasPrefix("creator_") }) { return (.premium, "Paid") }
             return (.unknown, nil)
         }
         if svc.contains("kling") {

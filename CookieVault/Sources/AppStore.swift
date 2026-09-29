@@ -189,6 +189,7 @@ public struct CookieFile: Identifiable, Codable {
     public var serviceName: String? = nil
     public var saved: Bool = false
     public var lastOpenedURL: String? = nil   // remembered launch URL, for "reopen at same URL"
+    public var planFolder: String? = nil      // the tier subfolder from the import (e.g. "Premium", "Standard with ads")
 
     public init(id: UUID = UUID(), name: String, path: String, format: CookieFormat, cookies: [Cookie], addedAt: Date = Date(), tags: [String] = [], note: String = "", folderName: String? = nil, tier: AccountTier = .unknown, accountEmail: String? = nil, planName: String? = nil, serviceName: String? = nil, saved: Bool = false) {
         self.id = id
@@ -208,7 +209,7 @@ public struct CookieFile: Identifiable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, path, format, cookies, addedAt, tags, note, folderName, tier, accountEmail, planName, serviceName, saved, lastOpenedURL
+        case id, name, path, format, cookies, addedAt, tags, note, folderName, tier, accountEmail, planName, serviceName, saved, lastOpenedURL, planFolder
     }
 
     public init(from decoder: Decoder) throws {
@@ -224,6 +225,7 @@ public struct CookieFile: Identifiable, Codable {
         self.folderName = try? c.decodeIfPresent(String.self, forKey: .folderName)
         self.saved = (try? c.decodeIfPresent(Bool.self, forKey: .saved)) ?? false
         self.lastOpenedURL = try? c.decodeIfPresent(String.self, forKey: .lastOpenedURL)
+        self.planFolder = try? c.decodeIfPresent(String.self, forKey: .planFolder)
         let loadedTier = (try? c.decodeIfPresent(AccountTier.self, forKey: .tier)) ?? .unknown
         let loadedEmail = try? c.decodeIfPresent(String.self, forKey: .accountEmail)
         let loadedPlan = try? c.decodeIfPresent(String.self, forKey: .planName)
@@ -505,17 +507,19 @@ public class AppStore: ObservableObject {
                         cookies[i].tier = meta.tier; cookies[i].accountEmail = meta.email
                         cookies[i].planName = meta.plan; changed = true
                     }
-                    if let chosen = AppStore.deriveSite(from: cookies[i].cookies) ?? meta.service,
+                    // Prefer the archive-folder service (reliable) over cookie-domain derivation.
+                    let folderSvc = cookies[i].folderName.flatMap { AppStore.serviceFromHitsFolder($0) }
+                    if let chosen = folderSvc ?? AppStore.deriveSite(from: cookies[i].cookies) ?? meta.service,
                        cookies[i].serviceName != chosen {
                         cookies[i].serviceName = chosen; changed = true
                     }
-                    let r = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name)
+                    let r = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name, folderHint: cookies[i].planFolder)
                     if cookies[i].tier != r.tier { cookies[i].tier = r.tier; changed = true }
                     if let p = r.plan, cookies[i].planName != p { cookies[i].planName = p; changed = true }
                     stateCache[cookies[i].id] = r.state
                 } else {
                     // Fast path: trust persisted tier/service; only compute the transient state.
-                    stateCache[cookies[i].id] = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name).state
+                    stateCache[cookies[i].id] = PlanClassifier.classify(service: cookies[i].serviceName ?? "", name: cookies[i].name, folderHint: cookies[i].planFolder).state
                 }
                 cache[cookies[i].id] = AccountMetrics.parse(name: cookies[i].name)
             }
@@ -651,6 +655,42 @@ public class AppStore: ObservableObject {
         return parts.count >= 2 ? parts.suffix(2).joined(separator: ".") : host
     }
 
+    /// Maps a checker-style service archive folder ("netflix_hits", "mihoyo_hoyolab_hits",
+    /// "hbo_max_hits", "steam_cookie_hits") to its section name. This is the most reliable
+    /// service signal for these dumps — more so than cookie domains, which can scatter across
+    /// CDNs/analytics — so every service gets its own clean section.
+    static func serviceFromHitsFolder(_ folder: String) -> String? {
+        var key = (folder.split(separator: "/").last.map(String.init) ?? folder).lowercased()
+        for suffix in ["_cookie_hits", "_hits", "_cookies", "_hit"] where key.hasSuffix(suffix) {
+            key = String(key.dropLast(suffix.count)); break
+        }
+        key = key.trimmingCharacters(in: .whitespaces)
+        let map: [String: String] = [
+            "2captcha": "2Captcha", "amazon": "Amazon", "canalplus": "Canal+", "chatgpt": "ChatGPT",
+            "claude": "Claude", "coursera": "Coursera", "crunchyroll": "Crunchyroll", "cursor": "Cursor",
+            "deezer": "Deezer", "duolingo": "Duolingo", "epicgames": "Epic Games", "facebook": "Facebook",
+            "freepik": "Freepik", "g2a": "G2A", "gog": "GOG", "google": "Google", "gmail": "Gmail",
+            "grammarly": "Grammarly", "grok": "Grok", "hbo_max": "HBO Max", "hbomax": "HBO Max",
+            "hedra": "Hedra", "heygen": "HeyGen", "higgsfield": "Higgsfield", "hotstar": "Hotstar",
+            "instagram": "Instagram", "kick": "Kick", "kling": "Kling", "krea_ai": "Krea", "krea": "Krea",
+            "linkedin": "LinkedIn", "lovable": "Lovable", "manus": "Manus", "mihoyo_hoyolab": "HoYoLAB",
+            "hoyolab": "HoYoLAB", "netflix": "Netflix", "openrouter": "OpenRouter", "outlook": "Outlook",
+            "patreon": "Patreon", "perplexity": "Perplexity", "pinterest": "Pinterest", "plextv": "Plex",
+            "plex": "Plex", "primevideo": "Prime Video", "reddit": "Reddit", "replit": "Replit",
+            "semrush": "Semrush", "sensortower": "Sensor Tower", "scribd": "Scribd", "soundcloud": "SoundCloud",
+            "spotify": "Spotify", "steam": "Steam", "steam_cookie": "Steam", "tiktok": "TikTok",
+            "tradingview": "TradingView", "twitch": "Twitch", "twitter": "X (Twitter)", "uber": "Uber",
+            "udemy": "Udemy", "venice": "Venice", "whop": "Whop", "youtube": "YouTube", "chess": "Chess.com",
+            "blackbox": "Blackbox AI", "booking": "Booking.com", "ebay": "eBay", "trustpilot": "Trustpilot",
+            "patched": "Patched", "minecraft": "Minecraft", "supercell": "Supercell", "magnific": "Magnific",
+            "hotmail": "Outlook", "roblox": "Roblox"
+        ]
+        if let exact = map[key] { return exact }
+        // Fall back to a contains match for compound names ("mihoyo_hoyolab" already keyed).
+        for (k, v) in map where key.contains(k) { return v }
+        return nil
+    }
+
     /// Fills in serviceName from cookie domains for accounts with no/weak service,
     /// then persists. Cheap no-op once everything is labelled.
     public func enrichServiceNames() {
@@ -674,10 +714,11 @@ public class AppStore: ObservableObject {
         let ids = Set(newFiles.map { $0.id })
         for i in cookieFiles.indices where ids.contains(cookieFiles[i].id) {
             let meta = AppStore.extractCookieMetadata(fileName: cookieFiles[i].name, path: cookieFiles[i].path)
-            if let chosen = AppStore.deriveSite(from: cookieFiles[i].cookies) ?? meta.service {
+            let folderSvc = cookieFiles[i].folderName.flatMap { AppStore.serviceFromHitsFolder($0) }
+            if let chosen = folderSvc ?? AppStore.deriveSite(from: cookieFiles[i].cookies) ?? meta.service {
                 cookieFiles[i].serviceName = chosen
             }
-            let r = PlanClassifier.classify(service: cookieFiles[i].serviceName ?? "", name: cookieFiles[i].name)
+            let r = PlanClassifier.classify(service: cookieFiles[i].serviceName ?? "", name: cookieFiles[i].name, folderHint: cookieFiles[i].planFolder)
             cookieFiles[i].tier = r.tier
             if let p = r.plan { cookieFiles[i].planName = p }
             stateCache[cookieFiles[i].id] = r.state
@@ -919,7 +960,9 @@ public class AppStore: ObservableObject {
         var metrics: [UUID: AccountMetrics] = [:]
     }
 
-    private func parseFilesConcurrently(_ urls: [URL], folderName: String, tab: AppTab) async -> ParsedBatch {
+    private func parseFilesConcurrently(_ urls: [URL], folderName: String, tab: AppTab, rootDir: URL? = nil) async -> ParsedBatch {
+        // The service archive name (e.g. "netflix_hits") is the most reliable service signal here.
+        let folderService = AppStore.serviceFromHitsFolder(folderName)
         // Parse + fully classify one file off the main thread (all pure work).
         func parseOne(_ fileURL: URL) -> (CookieFile?, APIKeyFile?, AccountState?, AccountMetrics?) {
             guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return (nil, nil, nil, nil) }
@@ -930,12 +973,21 @@ public class AppStore: ObservableObject {
                 guard !cookies.isEmpty else { return (nil, nil, nil, nil) }
                 let baseName = fileURL.deletingPathExtension().lastPathComponent
                 let meta = AppStore.extractCookieMetadata(fileName: baseName, path: fileURL.path)
-                // Authoritative service comes from cookie domains, falling back to filename.
-                let service = AppStore.deriveSite(from: cookies) ?? meta.service
-                let r = PlanClassifier.classify(service: service ?? "", name: baseName)
-                let file = CookieFile(name: baseName, path: fileURL.path, format: format, cookies: cookies,
+                // Tier subfolder: the top-level directory the account sits in under the archive
+                // root (e.g. "Premium", "Standard with ads", "Prime_NoSub_Unknown").
+                var planFolder: String? = nil
+                if let root = rootDir {
+                    let rel = fileURL.path.replacingOccurrences(of: root.path + "/", with: "")
+                    let comps = rel.split(separator: "/")
+                    if comps.count >= 2 { planFolder = String(comps.first!) }
+                }
+                // Service: the archive folder name (most reliable), then cookie domains, then filename.
+                let service = folderService ?? AppStore.deriveSite(from: cookies) ?? meta.service
+                let r = PlanClassifier.classify(service: service ?? "", name: baseName, folderHint: planFolder)
+                var file = CookieFile(name: baseName, path: fileURL.path, format: format, cookies: cookies,
                                       folderName: folderName, tier: r.tier, accountEmail: meta.email,
                                       planName: r.plan ?? meta.plan, serviceName: service)
+                file.planFolder = planFolder
                 let metrics = AccountMetrics.parse(name: baseName)
                 return (file, nil, r.state, metrics)
             } else {
@@ -998,7 +1050,7 @@ public class AppStore: ObservableObject {
 
         isIndexing = true
         Task.detached(priority: .userInitiated) { [self] in
-            let batch = await parseFilesConcurrently(fileURLs, folderName: folderName, tab: tab)
+            let batch = await parseFilesConcurrently(fileURLs, folderName: folderName, tab: tab, rootDir: folderURL)
             await MainActor.run {
                 commitImportedBatch(batch, folderName: folderName)
                 isIndexing = false
@@ -1071,7 +1123,7 @@ public class AppStore: ObservableObject {
                 fileURLs.append(fileURL)
             }
 
-            let batch = await parseFilesConcurrently(fileURLs, folderName: zipName, tab: tab)
+            let batch = await parseFilesConcurrently(fileURLs, folderName: zipName, tab: tab, rootDir: tmpDir)
 
             await MainActor.run {
                 commitImportedBatch(batch, folderName: zipName)
