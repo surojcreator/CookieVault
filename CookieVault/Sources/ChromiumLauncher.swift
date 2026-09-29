@@ -173,10 +173,12 @@ public final class ChromiumLauncher {
                                 sessionId: sessionId)
 
         progress("Injecting \(cookies.count) cookies…")
-        // Set cookies at the browser level (no sessionId) so they apply to every request
-        // the page makes after you start interacting, not just the first navigation.
-        _ = try await cdp.send("Network.setCookies", ["cookies": Self.cookieParams(cookies)])
-        _ = try? await cdp.send("Network.setCookies", ["cookies": Self.cookieParams(cookies)], sessionId: sessionId)
+        let params = Self.cookieParams(cookies)
+        // Primary injection on the page session (this is the call that works on modern Chrome).
+        _ = try await cdp.send("Network.setCookies", ["cookies": params], sessionId: sessionId)
+        // Best-effort browser-wide copy so requests outside the page session carry them too.
+        // Storage.setCookies is the correct browser-level method (Network.setCookies needs a session).
+        _ = try? await cdp.send("Storage.setCookies", ["cookies": params])
 
         progress("Loading page…")
         _ = try await cdp.send("Page.navigate", ["url": targetURL.absoluteString], sessionId: sessionId)
@@ -190,10 +192,13 @@ public final class ChromiumLauncher {
     ///   log you out on the first action). `SameSite=None` requires `Secure`, so we force it.
     /// - `url`: supplied so host-only cookies scope correctly instead of being rejected.
     private static func cookieParams(_ cookies: [Cookie]) -> [[String: Any]] {
-        cookies.map { c in
-            let domain = c.domain
-            let hostOnly = !domain.hasPrefix(".")
+        cookies.compactMap { c in
+            let domain = c.domain.trimmingCharacters(in: .whitespaces)
             let bareHost = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
+            // Skip cookies with no usable host — a single bad entry would otherwise make CDP
+            // reject the whole setCookies batch (which broke launching entirely).
+            guard bareHost.contains(".") else { return nil }
+            let hostOnly = !domain.hasPrefix(".")
             let path = c.path.isEmpty ? "/" : c.path
 
             // Resolve sameSite; default to None so auth cookies survive XHR/fetch after interaction.
@@ -213,12 +218,14 @@ public final class ChromiumLauncher {
                 "secure": secure,
                 "httpOnly": c.flag,
                 "sameSite": ss,
-                // A url lets CDP resolve scope for host-only cookies; https matches Secure.
-                "url": "https://\(bareHost)\(path)",
             ]
-            // For domain (dot-prefixed) cookies keep the explicit domain for subdomain coverage;
-            // for host-only cookies rely on the url so they aren't wrongly widened.
-            if !hostOnly { p["domain"] = domain }
+            // Domain (dot-prefixed) cookies: explicit domain for subdomain coverage.
+            // Host-only cookies: a url so CDP scopes them to just that host.
+            if hostOnly {
+                p["url"] = "https://\(bareHost)\(path)"
+            } else {
+                p["domain"] = domain
+            }
             if let exp = c.expiry { p["expires"] = exp.timeIntervalSince1970 }
             return p
         }
