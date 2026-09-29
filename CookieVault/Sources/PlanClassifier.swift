@@ -171,8 +171,25 @@ public enum PlanClassifier {
             return (.free, nil)
         }
 
+        // ── Services with no premium/free subscription concept (state-only labels) ──
+        if svc.contains("2captcha") || svc.contains("captcha") {
+            // "LowBalance"/"Active"/"Worker" are account states, not paid tiers → never premium.
+            return (.free, nil)
+        }
+        if svc.contains("freepik") || svc.contains("magnific") {
+            if nameHas("nopay") || hasFree() { return (.free, "Free") }
+            if firstPremium() != nil || has("premium") { return (.premium, "Premium") }
+            return (.unknown, nil)
+        }
+        if svc.contains("whop") {
+            if hasFree() { return (.free, "Free") }
+            if has("seller") { return (.premium, "Seller") }
+            if has("member") || has("paid") { return (.premium, "Member") }
+            return (.unknown, nil)
+        }
+
         // ── Free-only services (no paid subscription tier) ──────────────────────
-        if svc.contains("pinterest") { return (.free, has("biz") ? "Business" : "Personal") }
+        if svc.contains("pinterest") { return (.free, (has("biz") || has("business")) ? "Business" : "Personal") }
         if svc.contains("youtube") {
             if has("premium") || nameHas("premium") { return (.premium, "Premium") }
             return (.free, nil) // content accounts, not YouTube Premium subs
