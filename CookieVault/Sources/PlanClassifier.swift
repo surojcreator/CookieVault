@@ -141,9 +141,11 @@ public enum PlanClassifier {
             return (.premium, "Prime") // a live Prime Video session implies an active Prime sub
         }
         if svc.contains("plex") && !svc.contains("perplex") {   // guard: "perplexity" contains "plex"
+            // NB: every Plex account filename carries a "[Plex]" service marker — that is NOT a
+            // plan, so it must never trigger premium. Check the real Free/Premium signals only.
+            if hasFree() { return (.free, "Free") }                       // Free folder / [Free] token
             if has("lifetime") || has("∞") { return (.premium, "Lifetime") }
-            if firstPremium() != nil || has("monthly") || has("yearly") || has("plex") { return (.premium, "Plex Pass") }
-            if hasFree() { return (.free, "Free") }
+            if firstPremium() != nil || has("monthly") || has("yearly") { return (.premium, "Plex Pass") }
             return (.unknown, nil)
         }
         if svc.contains("crunchyroll") {
