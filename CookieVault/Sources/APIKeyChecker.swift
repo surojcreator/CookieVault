@@ -653,14 +653,40 @@ public enum APIKeyChecker {
                 var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200; d.rawSnippet = String(data: data.prefix(800), encoding: .utf8)
                 if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let uname = j["username"] as? String ?? "user"
-                    d.accountName = uname
+                    let disc = j["discriminator"] as? String ?? "0"
+                    let global = j["global_name"] as? String
+                    let id = j["id"] as? String ?? ""
+                    // New-style @username, or legacy name#1234.
+                    let handle = (disc == "0" || disc.isEmpty) ? "@\(uname)" : "\(uname)#\(disc)"
+                    d.accountName = global != nil && !global!.isEmpty ? "\(global!) (\(handle))" : handle
                     d.email = j["email"] as? String
-                    if let mfa = j["mfa_enabled"] as? Bool { d.planOrTier = mfa ? "2FA on" : "2FA off" }
-                    if (j["verified"] as? Bool) == true { d.permissions = ["verified"] }
+
+                    // Nitro tier from premium_type (0 none, 1 Classic, 2 Nitro, 3 Basic).
+                    let premium = j["premium_type"] as? Int ?? 0
+                    let nitro = ["No Nitro", "Nitro Classic", "Nitro", "Nitro Basic"]
+                    d.planOrTier = premium < nitro.count ? nitro[premium] : "No Nitro"
+                    d.balanceOrQuota = "ID \(id)"
+
+                    // Account facts as chips.
+                    var facts: [String] = []
+                    if let phone = j["phone"] as? String, !phone.isEmpty { facts.append("phone verified") }
+                    facts.append((j["verified"] as? Bool) == true ? "email verified" : "email unverified")
+                    facts.append((j["mfa_enabled"] as? Bool) == true ? "2FA on" : "2FA off")
+                    if let locale = j["locale"] as? String { facts.append("locale \(locale)") }
+                    // Decode a few notable public badges from the flags bitfield.
+                    let flags = (j["public_flags"] as? Int) ?? (j["flags"] as? Int) ?? 0
+                    let badges: [(Int,String)] = [(1<<0,"Staff"),(1<<1,"Partner"),(1<<2,"HypeSquad"),
+                        (1<<3,"Bug Hunter"),(1<<6,"Bravery"),(1<<7,"Brilliance"),(1<<8,"Balance"),
+                        (1<<9,"Early Supporter"),(1<<14,"Bug Hunter 2"),(1<<17,"Early Verified Bot Dev"),(1<<22,"Active Developer")]
+                    for (bit,label) in badges where flags & bit != 0 { facts.append(label) }
+                    d.permissions = facts
                 }
-                return CheckResult(status: .valid, snippet: "Valid Discord user: \(d.accountName ?? "user")", details: d)
+                let extra = d.planOrTier.map { " · \($0)" } ?? ""
+                return CheckResult(status: .valid, snippet: "Valid Discord: \(d.accountName ?? "user")\(extra)", details: d)
             }
-            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid Discord user token") }
+            if code == 401 { return CheckResult(status: .invalid, snippet: "Invalid or expired Discord token") }
+            if code == 403 { return CheckResult(status: .permissionDenied, snippet: "Discord token locked/flagged (HTTP 403)") }
+            if code == 429 { return CheckResult(status: .rateLimited, snippet: "Discord rate limited (HTTP 429)") }
             return CheckResult(status: .error, snippet: "HTTP \(code)")
         } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
     }

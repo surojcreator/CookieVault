@@ -148,6 +148,15 @@ struct SidebarView: View {
                         .font(.system(size: 9.5)).foregroundColor(Theme.textTer)
                 }
                 Spacer()
+                Button { store.killAllCookieSessions() } label: {
+                    Image(systemName: "xmark.octagon.fill")
+                        .font(.system(size: 13, weight: .bold)).foregroundColor(Theme.red)
+                        .frame(width: 30, height: 30)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.red.opacity(0.12)))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.red.opacity(0.3), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Close all open cookie-session browser windows (leaves your own Chrome alone)")
             }
             .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 16)
 
@@ -598,6 +607,27 @@ struct APIKeysSidebarList: View {
                     }
                     .padding(.bottom, 4)
                 }
+
+                // Dedicated Discord-token import → creates a "Discord Tokens" section.
+                Button { store.importDiscordTokens() } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7).fill(Color(hex: "5865f2").opacity(0.18)).frame(width: 28, height: 28)
+                            Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 12)).foregroundColor(Color(hex: "5865f2"))
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Check Discord Tokens").font(.system(size: 12.5, weight: .semibold)).foregroundColor(Theme.textSec)
+                            Text("import a token list, then Check All").font(.system(size: 10)).foregroundColor(Theme.textTer)
+                        }
+                        Spacer()
+                        Image(systemName: "plus.circle.fill").font(.system(size: 14)).foregroundColor(Color(hex: "5865f2"))
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: Theme.rSm).fill(Color(hex: "5865f2").opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.rSm).stroke(Color(hex: "5865f2").opacity(0.25), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 4)
 
                 if !store.apiKeyFolders.isEmpty {
                     SectionHeader(title: "Folders") { store.chooseFolder(tab: .apiKeys) }

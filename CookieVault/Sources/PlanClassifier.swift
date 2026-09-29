@@ -107,11 +107,29 @@ public enum PlanClassifier {
         func has(_ w: String) -> Bool { tokens.contains(w) }
         // Some services put the plan in the raw name (underscore-separated), not brackets.
         func nameHas(_ w: String) -> Bool { lname.contains(w) }
+        // Parse a "renew_YYYY-MM-DD" / "renew_0001-01-01" date from the filename, if present.
+        func renewDate(_ s: String) -> Date? {
+            guard let re = try? NSRegularExpression(pattern: #"renew[_ ]?(\d{4})-(\d{2})-(\d{2})"#),
+                  let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+                  let yR = Range(m.range(at: 1), in: s), let moR = Range(m.range(at: 2), in: s), let dR = Range(m.range(at: 3), in: s),
+                  let y = Int(s[yR]), let mo = Int(s[moR]), let d = Int(s[dR]) else { return nil }
+            if y <= 1 { return .distantPast }   // 0001-01-01 sentinel = no active renewal
+            var c = DateComponents(); c.year = y; c.month = mo; c.day = d
+            return Calendar(identifier: .gregorian).date(from: c)
+        }
 
         // Services whose plan lives in the raw filename rather than [brackets].
         if svc.contains("crunchyroll") {
-            if nameHas("premium") || nameHas("mega") || nameHas("fan") { return (.premium, "Premium") }
             if nameHas("free") { return (.free, "Free") }
+            // Filenames are "..._Premium_Card_RENEW_YYYY-MM-DD". The "Premium" label is on every
+            // row, so it can't mean active on its own — a RENEW date of 0001-01-01 (or any past
+            // date) is a lapsed/cancelled sub with a card still on file, NOT active premium.
+            if let renew = renewDate(lname) {
+                return renew >= Date() ? (.premium, "Premium") : (.free, "Expired")
+            }
+            // No parseable renewal date: fall back to explicit plan words (not loose "fan"/"mega",
+            // which match ordinary emails/usernames).
+            if nameHas("premium") || nameHas("mega fan") || nameHas("megafan") { return (.premium, "Premium") }
             return (.unknown, nil)
         }
         if svc.contains("duolingo") {

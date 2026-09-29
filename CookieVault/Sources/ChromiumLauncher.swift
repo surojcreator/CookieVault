@@ -88,6 +88,47 @@ public final class ChromiumLauncher {
         for item in items { try? FileManager.default.removeItem(at: item) }
     }
 
+    // Browsers this app launched for cookie sessions, so we can terminate them on demand.
+    private let launchLock = NSLock()
+    private var launchedSessions: [Process] = []
+
+    private func trackSession(_ p: Process) {
+        launchLock.lock(); launchedSessions.append(p); launchLock.unlock()
+    }
+
+    /// Number of cookie-session browsers this app currently has running.
+    public var runningSessionCount: Int {
+        launchLock.lock(); defer { launchLock.unlock() }
+        return launchedSessions.filter { $0.isRunning }.count
+    }
+
+    /// Kill every isolated cookie-session browser this app launched — WITHOUT touching the
+    /// user's own Chrome. Terminates tracked processes, then `pkill`s any session browser by
+    /// its unique profile marker (covers instances launched before an app restart), and sweeps
+    /// the leftover profiles. Returns how many tracked processes were signalled.
+    @discardableResult
+    public func killAllSessions() -> Int {
+        launchLock.lock()
+        let procs = launchedSessions
+        launchedSessions.removeAll()
+        launchLock.unlock()
+
+        var killed = 0
+        for p in procs where p.isRunning { p.terminate(); killed += 1 }
+
+        // Belt-and-braces: pkill anything whose command line carries our profile marker.
+        // Only this app's session browsers use "CookieVaultSessions" in --user-data-dir, so
+        // the user's regular Chrome windows are never affected.
+        let pk = Process()
+        pk.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pk.arguments = ["-f", "CookieVaultSessions"]
+        try? pk.run(); pk.waitUntilExit()
+
+        // Give processes a moment to exit, then remove their profiles.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { Self.sweepOldSessions() }
+        return killed
+    }
+
     // MARK: - Public launch entry point
 
     /// Launches a browser with a dedicated profile, injects `cookies` via DevTools,
@@ -126,6 +167,7 @@ public final class ChromiumLauncher {
             "about:blank",
         ]
         try task.run()
+        trackSession(task)
 
         // When this isolated browser is closed, wipe its profile (and the injected cookies).
         Task.detached(priority: .background) {

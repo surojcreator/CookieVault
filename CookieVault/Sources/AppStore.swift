@@ -1216,6 +1216,34 @@ public class AppStore: ObservableObject {
         importZip(from: url, targetTab: .apiKeys)
     }
 
+    /// Dedicated Discord-token import: pick one or more .txt files (one token per line) and
+    /// import them as a Discord Tokens section, forcing the discord_user checker regardless of
+    /// the file's name. Also accepts a .zip of token lists.
+    public func importDiscordTokens() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.text, .plainText, .zip]
+        panel.title = "Import Discord Tokens"
+        guard panel.runModal() == .OK else { return }
+        var total = 0, files = 0
+        for url in panel.urls {
+            if url.pathExtension.lowercased() == "zip" { importZip(from: url, targetTab: .apiKeys); continue }
+            let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let keys = content.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                .map { APIKey(value: $0) }
+            guard !keys.isEmpty else { continue }
+            let info = serviceInfo(for: "discord_user")
+            let file = APIKeyFile(service: "discord_user", displayName: "Discord Tokens",
+                                  icon: info.icon, keys: keys, checkEndpoint: nil)
+            apiKeyFiles.append(file)
+            selectedAPIFile = file; selectedAPIFolder = nil; showAllValidKeys = false
+            total += keys.count; files += 1
+        }
+        if total > 0 { save(); showToast("Imported \(total) Discord token\(total == 1 ? "" : "s")", type: .success) }
+        else { showToast("No tokens found in the selected file(s)", type: .warning) }
+    }
+
     // MARK: - Deletion Helpers
     public func deleteCookieFile(_ file: CookieFile) {
         cookieFiles.removeAll { $0.id == file.id }
@@ -1585,6 +1613,15 @@ public class AppStore: ObservableObject {
     // Chrome/Chromium, unlike writing the Cookies SQLite file directly (which recent
     // versions discard because cookies must be Keychain-encrypted). If no Chromium
     // browser is installed, the user is offered an open-source Chromium download.
+    /// Terminate every isolated cookie-session browser this app launched (leaves the user's
+    /// own Chrome untouched) and wipe their profiles.
+    public func killAllCookieSessions() {
+        let n = ChromiumLauncher.shared.runningSessionCount
+        ChromiumLauncher.shared.killAllSessions()
+        isLaunching = false; launchStatus = ""; launchProgress = 0
+        showToast(n > 0 ? "Closed \(n) cookie-session browser\(n == 1 ? "" : "s")" : "No open cookie sessions to close", type: .info)
+    }
+
     /// Default landing URL for a session: the remembered last URL, else the session's main site.
     func defaultTargetURLString(for file: CookieFile) -> String {
         if let last = file.lastOpenedURL, !last.isEmpty { return last }
