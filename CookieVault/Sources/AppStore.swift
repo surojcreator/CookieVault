@@ -259,8 +259,9 @@ public struct Cookie: Identifiable, Codable {
     public var expiry: Date?
     public var name: String
     public var value: String
+    public var sameSite: String?   // "None" | "Lax" | "Strict" — preserved from JSON exports
 
-    public init(id: UUID = UUID(), domain: String, flag: Bool, path: String, secure: Bool, expiry: Date?, name: String, value: String) {
+    public init(id: UUID = UUID(), domain: String, flag: Bool, path: String, secure: Bool, expiry: Date?, name: String, value: String, sameSite: String? = nil) {
         self.id = id
         self.domain = domain
         self.flag = flag
@@ -269,6 +270,7 @@ public struct Cookie: Identifiable, Codable {
         self.expiry = expiry
         self.name = name
         self.value = value
+        self.sameSite = sameSite
     }
 
     public var isExpired: Bool {
@@ -1484,7 +1486,17 @@ public class AppStore: ObservableObject {
             } else {
                 expiry = nil
             }
-            return Cookie(domain: domain, flag: httpOnly, path: path, secure: secure, expiry: expiry, name: name, value: value)
+            // Normalize the exported sameSite value (e.g. "no_restriction" → "None", "lax" → "Lax").
+            var sameSite: String? = nil
+            if let ss = (obj["sameSite"] as? String)?.lowercased() {
+                switch ss {
+                case "no_restriction", "none": sameSite = "None"
+                case "lax": sameSite = "Lax"
+                case "strict": sameSite = "Strict"
+                default: sameSite = nil
+                }
+            }
+            return Cookie(domain: domain, flag: httpOnly, path: path, secure: secure, expiry: expiry, name: name, value: value, sameSite: sameSite)
         }
     }
 

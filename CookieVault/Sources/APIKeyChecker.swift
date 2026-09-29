@@ -831,7 +831,24 @@ public enum APIKeyChecker {
                 details.planOrTier = models.contains(where: { $0.contains("gpt-4") || $0.contains("o1") }) ? "GPT-4 / Reasoning Tier" : "Standard"
                 details.balanceOrQuota = "\(models.count) models available"
 
-                let summary = "Valid (\(models.count) models: \(models.prefix(3).joined(separator: ", ")))"
+                // Secondary: /v1/me reveals the user + organizations this key belongs to.
+                if let meURL = URL(string: "https://api.openai.com/v1/me") {
+                    var meReq = URLRequest(url: meURL, timeoutInterval: 6)
+                    meReq.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    if let (md, mResp) = try? await APIKeyChecker.send(meReq),
+                       (mResp as? HTTPURLResponse)?.statusCode == 200,
+                       let mj = try? JSONSerialization.jsonObject(with: md) as? [String: Any] {
+                        details.accountName = (mj["name"] as? String) ?? (mj["email"] as? String)
+                        details.email = mj["email"] as? String
+                        if let orgs = (mj["orgs"] as? [String: Any])?["data"] as? [[String: Any]] {
+                            let names = orgs.compactMap { ($0["title"] as? String) ?? ($0["id"] as? String) }
+                            if !names.isEmpty { details.permissions = names.map { "org: \($0)" } }
+                        }
+                    }
+                }
+
+                let who = details.accountName.map { " · \($0)" } ?? ""
+                let summary = "Valid (\(models.count) models)\(who)"
                 return CheckResult(status: .valid, snippet: summary, details: details)
             } else if code == 429 {
                 var details = KeyDetails()
@@ -957,15 +974,27 @@ public enum APIKeyChecker {
                     let label = d["label"] as? String
                     let usage = d["usage"] as? Double ?? 0.0
                     let limit = d["limit"] as? Double
+                    let remaining = d["limit_remaining"] as? Double
                     let isFree = d["is_free_tier"] as? Bool ?? false
+                    let tier = d["tier"] as? String
 
                     details.accountName = label ?? "OpenRouter Key"
-                    details.planOrTier = isFree ? "Free Tier" : "Paid Tier"
+                    details.planOrTier = (tier?.capitalized).map { "\($0) tier" } ?? (isFree ? "Free Tier" : "Paid Tier")
                     if let limit {
-                        details.balanceOrQuota = String(format: "Usage: $%.3f / Limit: $%.2f", usage, limit)
+                        let rem = remaining.map { String(format: " · $%.2f left", $0) } ?? ""
+                        details.balanceOrQuota = String(format: "Usage $%.3f / Limit $%.2f", usage, limit) + rem
                     } else {
-                        details.balanceOrQuota = String(format: "Usage: $%.3f (No limit)", usage)
+                        details.balanceOrQuota = String(format: "Usage $%.3f (no limit)", usage)
                     }
+                    // Surface rate-limit + provisioning-key facts as structured chips.
+                    var extra: [String] = []
+                    if let rl = d["rate_limit"] as? [String: Any] {
+                        let r = rl["requests"] as? Double ?? 0
+                        let interval = rl["interval"] as? String ?? ""
+                        if r > 0 { extra.append("rate \(Int(r))/\(interval)") }
+                    }
+                    if (d["is_provisioning_key"] as? Bool) == true { extra.append("provisioning key") }
+                    if !extra.isEmpty { details.permissions = extra }
                 }
                 return CheckResult(status: .valid, snippet: details.balanceOrQuota ?? "Valid OpenRouter key", details: details)
             } else if code == 401 {
@@ -1030,9 +1059,9 @@ public enum APIKeyChecker {
         }
     }
 
-    // 7. HuggingFace
+    // 7. HuggingFace — whoami-v2 (modern hf_ tokens 401 on the old /api/whoami).
     private static func checkHuggingFace(key: String) async -> CheckResult {
-        guard let url = URL(string: "https://huggingface.co/api/whoami") else {
+        guard let url = URL(string: "https://huggingface.co/api/whoami-v2") else {
             return CheckResult(status: .error, snippet: "Invalid URL")
         }
         var req = URLRequest(url: url, timeoutInterval: 10)
@@ -1048,14 +1077,19 @@ public enum APIKeyChecker {
                 details.latencyMs = latency
                 details.httpCode = 200
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    let name = json["name"] as? String
-                    let email = json["email"] as? String
-                    let type = json["type"] as? String
-                    details.accountName = name
-                    details.email = email
-                    details.planOrTier = type?.capitalized ?? "User"
+                    details.accountName = json["name"] as? String ?? json["fullname"] as? String
+                    details.email = json["email"] as? String
+                    let type = (json["type"] as? String)?.capitalized ?? "User"
+                    // Token role (read/write/fine-grained) lives under auth.accessToken.role.
+                    let role = ((json["auth"] as? [String: Any])?["accessToken"] as? [String: Any])?["role"] as? String
+                    details.planOrTier = role != nil ? "\(type) · \(role!) token" : type
+                    if let plan = (json["plan"] as? String) { details.balanceOrQuota = "Plan: \(plan)" }
+                    if let orgs = json["orgs"] as? [[String: Any]] {
+                        let names = orgs.compactMap { $0["name"] as? String }
+                        if !names.isEmpty { details.permissions = names.map { "org: \($0)" } }
+                    }
                 }
-                return CheckResult(status: .valid, snippet: "Valid: @\(details.accountName ?? "user")", details: details)
+                return CheckResult(status: .valid, snippet: "Valid HuggingFace: @\(details.accountName ?? "user")", details: details)
             } else if code == 401 {
                 return CheckResult(status: .invalid, snippet: "Invalid HuggingFace token")
             } else {
@@ -1843,9 +1877,35 @@ public enum APIKeyChecker {
                    let scopes = json["scopes"] as? [String] {
                     details.permissions = scopes
                 }
-                return CheckResult(status: .valid, snippet: "Valid SendGrid Key (\(details.permissions?.count ?? 0) scopes)", details: details)
+                // Secondary: /v3/user/account (type + reputation) and /v3/user/credits (balance).
+                if let accURL = URL(string: "https://api.sendgrid.com/v3/user/account") {
+                    var accReq = URLRequest(url: accURL, timeoutInterval: 6)
+                    accReq.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    if let (ad, aResp) = try? await APIKeyChecker.send(accReq),
+                       (aResp as? HTTPURLResponse)?.statusCode == 200,
+                       let aj = try? JSONSerialization.jsonObject(with: ad) as? [String: Any] {
+                        let type = (aj["type"] as? String)?.capitalized ?? "Account"
+                        let rep = aj["reputation"] as? Double
+                        details.planOrTier = rep != nil ? "\(type) · reputation \(Int(rep!))%" : type
+                    }
+                }
+                if details.email == nil, let pURL = URL(string: "https://api.sendgrid.com/v3/user/profile") {
+                    var pReq = URLRequest(url: pURL, timeoutInterval: 6)
+                    pReq.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    if let (pd, pResp) = try? await APIKeyChecker.send(pReq),
+                       (pResp as? HTTPURLResponse)?.statusCode == 200,
+                       let pj = try? JSONSerialization.jsonObject(with: pd) as? [String: Any] {
+                        details.email = pj["email"] as? String
+                        if let u = pj["username"] as? String { details.accountName = u }
+                    }
+                }
+                let sc = details.permissions?.count ?? 0
+                let mailSend = (details.permissions ?? []).contains("mail.send") ? " · can send mail" : " · cannot send"
+                return CheckResult(status: .valid, snippet: "Valid SendGrid (\(sc) scopes\(mailSend))", details: details)
             } else if code == 401 {
                 return CheckResult(status: .invalid, snippet: "Invalid SendGrid Key")
+            } else if code == 403 {
+                return CheckResult(status: .permissionDenied, snippet: "SendGrid key valid but restricted (HTTP 403)")
             } else {
                 return CheckResult(status: .error, snippet: "HTTP \(code)")
             }
@@ -2315,13 +2375,37 @@ public enum APIKeyChecker {
         return await httpCheckGenericBearer(req: req, provider: "Dropbox")
     }
 
-    // 88. Facebook
+    // 88. Facebook — identity via /me, then granted permissions via /me/permissions.
     private static func checkFacebook(key: String) async -> CheckResult {
-        guard let url = URL(string: "https://graph.facebook.com/v18.0/me?access_token=\(key)") else {
+        let enc = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
+        guard let url = URL(string: "https://graph.facebook.com/v19.0/me?fields=id,name,email&access_token=\(enc)") else {
             return CheckResult(status: .error, snippet: "Invalid URL")
         }
-        let req = URLRequest(url: url, timeoutInterval: 10)
-        return await httpCheckGenericBearer(req: req, provider: "Facebook Graph API")
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.send(URLRequest(url: url, timeoutInterval: 10))
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], j["error"] == nil else {
+                let snip = String(data: data.prefix(160), encoding: .utf8) ?? ""
+                return CheckResult(status: .invalid, snippet: "Invalid Facebook token (\(snip.prefix(80)))")
+            }
+            var details = KeyDetails(); details.latencyMs = latency; details.httpCode = 200
+            details.accountName = j["name"] as? String
+            details.email = j["email"] as? String
+            details.planOrTier = (j["id"] as? String).map { "User ID \($0)" }
+            // Granted scopes for this token.
+            if let pURL = URL(string: "https://graph.facebook.com/v19.0/me/permissions?access_token=\(enc)"),
+               let (pd, _) = try? await APIKeyChecker.send(URLRequest(url: pURL, timeoutInterval: 6)),
+               let pj = try? JSONSerialization.jsonObject(with: pd) as? [String: Any],
+               let arr = pj["data"] as? [[String: Any]] {
+                let granted = arr.filter { ($0["status"] as? String) == "granted" }.compactMap { $0["permission"] as? String }
+                if !granted.isEmpty { details.permissions = granted }
+            }
+            return CheckResult(status: .valid, snippet: "Valid Facebook token · \(details.accountName ?? "user")", details: details)
+        } catch {
+            return CheckResult(status: .error, snippet: error.localizedDescription)
+        }
     }
 
     // 89. Firebase FCM

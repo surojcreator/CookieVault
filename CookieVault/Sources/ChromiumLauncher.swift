@@ -118,6 +118,11 @@ public final class ChromiumLauncher {
             "--no-service-autorun",
             "--password-store=basic",
             "--disable-sync",
+            // Anti-bot-detection: hide the automation fingerprint that makes sites like
+            // Patreon/Cloudflare invalidate the session the moment you interact with the page.
+            "--disable-blink-features=AutomationControlled",
+            "--exclude-switches=enable-automation",
+            "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
             "about:blank",
         ]
         try task.run()
@@ -159,24 +164,61 @@ public final class ChromiumLauncher {
         }
 
         _ = try await cdp.send("Network.enable", [:], sessionId: sessionId)
+        _ = try? await cdp.send("Page.enable", [:], sessionId: sessionId)
+
+        // Belt-and-braces stealth: also strip navigator.webdriver on every new document,
+        // so the automation flag never appears to page scripts even if a flag is ignored.
+        _ = try? await cdp.send("Page.addScriptToEvaluateOnNewDocument",
+                                ["source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"],
+                                sessionId: sessionId)
+
         progress("Injecting \(cookies.count) cookies…")
-        _ = try await cdp.send("Network.setCookies", ["cookies": Self.cookieParams(cookies)], sessionId: sessionId)
+        // Set cookies at the browser level (no sessionId) so they apply to every request
+        // the page makes after you start interacting, not just the first navigation.
+        _ = try await cdp.send("Network.setCookies", ["cookies": Self.cookieParams(cookies)])
+        _ = try? await cdp.send("Network.setCookies", ["cookies": Self.cookieParams(cookies)], sessionId: sessionId)
 
         progress("Loading page…")
         _ = try await cdp.send("Page.navigate", ["url": targetURL.absoluteString], sessionId: sessionId)
     }
 
     /// Maps our `Cookie` model to CDP `Network.CookieParam` dictionaries.
+    ///
+    /// Key correctness details for keeping a session alive once you interact with the page:
+    /// - `sameSite`: preserved from the export; when unknown we use `None` so the cookie is
+    ///   sent on the SPA's cross-context fetch/XHR calls (a `Lax` default would drop it and
+    ///   log you out on the first action). `SameSite=None` requires `Secure`, so we force it.
+    /// - `url`: supplied so host-only cookies scope correctly instead of being rejected.
     private static func cookieParams(_ cookies: [Cookie]) -> [[String: Any]] {
         cookies.map { c in
+            let domain = c.domain
+            let hostOnly = !domain.hasPrefix(".")
+            let bareHost = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
+            let path = c.path.isEmpty ? "/" : c.path
+
+            // Resolve sameSite; default to None so auth cookies survive XHR/fetch after interaction.
+            let ss: String
+            switch (c.sameSite ?? "").lowercased() {
+            case "lax": ss = "Lax"
+            case "strict": ss = "Strict"
+            default: ss = "None"
+            }
+            // SameSite=None mandates Secure; also force Secure on https hosts.
+            let secure = c.secure || ss == "None"
+
             var p: [String: Any] = [
                 "name": c.name,
                 "value": c.value,
-                "domain": c.domain,
-                "path": c.path.isEmpty ? "/" : c.path,
-                "secure": c.secure,
+                "path": path,
+                "secure": secure,
                 "httpOnly": c.flag,
+                "sameSite": ss,
+                // A url lets CDP resolve scope for host-only cookies; https matches Secure.
+                "url": "https://\(bareHost)\(path)",
             ]
+            // For domain (dot-prefixed) cookies keep the explicit domain for subdomain coverage;
+            // for host-only cookies rely on the url so they aren't wrongly widened.
+            if !hostOnly { p["domain"] = domain }
             if let exp = c.expiry { p["expires"] = exp.timeIntervalSince1970 }
             return p
         }
