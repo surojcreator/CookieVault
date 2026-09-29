@@ -629,6 +629,32 @@ struct APIKeysSidebarList: View {
                 .buttonStyle(.plain)
                 .padding(.bottom, 4)
 
+                // Proxy pool for API checks (avoid rate limits).
+                Button { store.showProxySheet = true } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7).fill(Theme.accent2.opacity(0.16)).frame(width: 28, height: 28)
+                            Image(systemName: "network.badge.shield.half.filled").font(.system(size: 12)).foregroundColor(Theme.accent2)
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Proxies").font(.system(size: 12.5, weight: .semibold)).foregroundColor(Theme.textSec)
+                            Text(store.parsedProxies.isEmpty ? "add proxies to dodge rate limits" : "\(store.parsedProxies.count) active").font(.system(size: 10)).foregroundColor(Theme.textTer)
+                        }
+                        Spacer()
+                        if !store.parsedProxies.isEmpty {
+                            Text("\(store.parsedProxies.count)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(Theme.green)
+                                .padding(.horizontal, 6).padding(.vertical, 1).background(Capsule().fill(Theme.green.opacity(0.14)))
+                        } else {
+                            Image(systemName: "plus.circle.fill").font(.system(size: 14)).foregroundColor(Theme.accent2)
+                        }
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: Theme.rSm).fill(Theme.accent.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.rSm).stroke(Theme.accent2.opacity(0.22), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 4)
+
                 if !store.apiKeyFolders.isEmpty {
                     SectionHeader(title: "Folders") { store.chooseFolder(tab: .apiKeys) }
                     ForEach(store.apiKeyFolders, id: \.self) { folder in

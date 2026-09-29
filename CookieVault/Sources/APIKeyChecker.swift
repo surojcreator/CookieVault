@@ -17,6 +17,34 @@ public enum APIKeyChecker {
         return URLSession(configuration: cfg)
     }()
 
+    // MARK: - Proxy pool (rotate requests across proxies to dodge rate limits)
+    private static let poolLock = NSLock()
+    private static var proxySessions: [ProxySession] = []   // empty ⇒ use the direct `session`
+    private static var rrCounter: Int = 0
+
+    /// Replace the proxy pool. `includeDirect` also rotates in the app's own IP.
+    static func configureProxies(_ configs: [ProxyConfig], includeDirect: Bool) {
+        poolLock.lock(); defer { poolLock.unlock() }
+        var pool: [ProxySession] = configs.map { ProxySession(direct: false, config: $0) }
+        if includeDirect || pool.isEmpty { pool.insert(ProxySession(direct: true, config: nil), at: 0) }
+        proxySessions = configs.isEmpty ? [] : pool
+        rrCounter = 0
+    }
+
+    static var activeProxyCount: Int {
+        poolLock.lock(); defer { poolLock.unlock() }
+        return proxySessions.filter { $0.label != "direct" }.count
+    }
+
+    /// Next session in round-robin. Falls back to the shared direct session when no proxies.
+    private static func nextSession() -> URLSession {
+        poolLock.lock(); defer { poolLock.unlock() }
+        guard !proxySessions.isEmpty else { return session }
+        let s = proxySessions[rrCounter % proxySessions.count]
+        rrCounter &+= 1
+        return s.session
+    }
+
     // MARK: - Per-host throttle + retry
     // Caps how many requests hit one host at once (so bulk checks of one provider don't
     // trip its rate limiter and mislabel valid keys), while still allowing high total
@@ -50,7 +78,8 @@ public enum APIKeyChecker {
         var attempt = 0
         while true {
             do {
-                let (data, resp) = try await session.data(for: req)
+                // Rotate across the proxy pool (or direct when none configured).
+                let (data, resp) = try await nextSession().data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if code == 429 && attempt < retries {
                     attempt += 1

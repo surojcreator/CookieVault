@@ -431,6 +431,15 @@ public class AppStore: ObservableObject {
     // Global "filter for all valids" smart view — shows every valid key across every file/type.
     @Published public var showAllValidKeys: Bool = false
 
+    // Proxy pool for API-key checking (avoids provider rate limits by rotating IPs).
+    @Published public var proxyText: String = "" {
+        didSet { UserDefaults.standard.set(proxyText, forKey: "cv_proxies") }
+    }
+    @Published public var proxyIncludeDirect: Bool = true {
+        didSet { UserDefaults.standard.set(proxyIncludeDirect, forKey: "cv_proxy_direct") }
+    }
+    @Published public var showProxySheet: Bool = false
+
     // Navigation & Folder Fold State
     @Published public var currentTab: AppTab = .cookies {
         didSet { UserDefaults.standard.set(currentTab.rawValue, forKey: "cv_tab") }
@@ -470,9 +479,56 @@ public class AppStore: ObservableObject {
         if let raw = UserDefaults.standard.string(forKey: "cv_tab"), let t = AppTab(rawValue: raw) {
             currentTab = t
         }
+        // Restore proxy settings and apply them to the checker.
+        proxyText = UserDefaults.standard.string(forKey: "cv_proxies") ?? ""
+        if UserDefaults.standard.object(forKey: "cv_proxy_direct") != nil {
+            proxyIncludeDirect = UserDefaults.standard.bool(forKey: "cv_proxy_direct")
+        }
+        applyProxies()
         // Decode + index the (potentially huge) data set OFF the main thread so the
         // window appears instantly instead of freezing on launch.
         loadPersistedDataAsync()
+    }
+
+    // MARK: - Proxies
+
+    /// Proxy lines that parse successfully.
+    public var parsedProxies: [ProxyConfig] { proxyText.components(separatedBy: .newlines).compactMap { ProxyConfig.parse($0) } }
+    /// How many non-empty lines failed to parse (for the UI to warn about).
+    public var invalidProxyLineCount: Int {
+        proxyText.components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+            .filter { ProxyConfig.parse($0) == nil }.count
+    }
+
+    /// Rebuild the checker's proxy pool from the current text/toggle. Call after edits.
+    public func applyProxies() {
+        APIKeyChecker.configureProxies(parsedProxies, includeDirect: proxyIncludeDirect)
+    }
+
+    /// Quick connectivity test: check a known-invalid key through the pool and report reachability.
+    @MainActor
+    public func testProxies() async {
+        applyProxies()
+        let n = parsedProxies.count
+        guard n > 0 else { showToast("No valid proxies to test", type: .warning); return }
+        showToast("Testing \(n) prox\(n == 1 ? "y" : "ies")…", type: .info)
+        // A lightweight reachability probe per proxy via a trivial HTTPS GET.
+        var ok = 0
+        await withTaskGroup(of: Bool.self) { group in
+            for cfg in parsedProxies {
+                group.addTask {
+                    let ps = ProxySession(direct: false, config: cfg)
+                    var req = URLRequest(url: URL(string: "https://api.github.com/zen")!, timeoutInterval: 12)
+                    req.setValue("CookieVault", forHTTPHeaderField: "User-Agent")
+                    if let (_, resp) = try? await ps.session.data(for: req),
+                       let code = (resp as? HTTPURLResponse)?.statusCode, code > 0 { return true }
+                    return false
+                }
+            }
+            for await r in group where r { ok += 1 }
+        }
+        showToast("Proxies reachable: \(ok)/\(n)", type: ok == n ? .success : (ok == 0 ? .error : .warning))
     }
 
     private func restoreExpandedState() {

@@ -35,8 +35,85 @@ struct APIKeysMainView: View {
                 KeyInspectorSheet(key: inspected, file: file) { store.inspectedKey = nil }
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
             }
+
+            if store.showProxySheet {
+                Color.black.opacity(0.6).ignoresSafeArea()
+                    .onTapGesture { store.applyProxies(); store.showProxySheet = false }
+                ProxySheet { store.applyProxies(); store.showProxySheet = false }
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+            }
         }
         .animation(.easeOut(duration: 0.16), value: store.inspectedKey?.id)
+        .animation(.easeOut(duration: 0.16), value: store.showProxySheet)
+    }
+}
+
+// MARK: - Proxy settings sheet
+
+struct ProxySheet: View {
+    @EnvironmentObject var store: AppStore
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                IconTile(symbol: "network.badge.shield.half.filled", tint: Theme.accent2, size: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Proxies for API checks").font(.system(size: 16, weight: .bold)).foregroundColor(Theme.textPri)
+                    Text("Rotated across every key check so no single IP gets rate limited")
+                        .font(.system(size: 11)).foregroundColor(Theme.textTer)
+                }
+                Spacer()
+                Button(action: onClose) { Image(systemName: "xmark.circle.fill").font(.system(size: 18)).foregroundColor(Theme.textTer) }
+                    .buttonStyle(.plain)
+            }
+            .padding(18).background(Theme.surfaceHi)
+            Rectangle().fill(Theme.border).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("One proxy per line. Supported formats:")
+                    .font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.textSec)
+                Text("host:port   ·   host:port:user:pass   ·   user:pass@host:port   ·   http(s)://user:pass@host:port   ·   socks5://host:port")
+                    .font(.system(size: 10, design: .monospaced)).foregroundColor(Theme.textTer)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                TextEditor(text: Binding(get: { store.proxyText }, set: { store.proxyText = $0 }))
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(height: 190)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: Theme.rSm).fill(Theme.inset))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.rSm).stroke(Theme.border, lineWidth: 1))
+
+                HStack(spacing: 10) {
+                    Text("\(store.parsedProxies.count) valid").font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.green)
+                    if store.invalidProxyLineCount > 0 {
+                        Text("\(store.invalidProxyLineCount) unparseable").font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.orange)
+                    }
+                    Spacer()
+                    Toggle(isOn: Binding(get: { store.proxyIncludeDirect }, set: { store.proxyIncludeDirect = $0; store.applyProxies() })) {
+                        Text("Also use my direct IP").font(.system(size: 11)).foregroundColor(Theme.textSec)
+                    }.toggleStyle(.switch).controlSize(.mini)
+                }
+            }
+            .padding(18)
+
+            Rectangle().fill(Theme.border).frame(height: 1)
+            HStack(spacing: 12) {
+                Button { store.applyProxies(); Task { await store.testProxies() } } label: {
+                    GhostButton(title: "Test proxies", systemImage: "bolt.horizontal.circle", tint: Theme.gold)
+                }.buttonStyle(.plain)
+                Spacer()
+                Button { store.applyProxies(); onClose() } label: {
+                    FilledButton(title: "Save & Apply", systemImage: "checkmark", gradient: Theme.accentGrad, glow: Theme.accent)
+                }.buttonStyle(.plain)
+            }
+            .padding(16).background(Theme.surfaceHi)
+        }
+        .frame(width: 560)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.rLg, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rLg, style: .continuous).stroke(Theme.borderHi, lineWidth: 1))
+        .shadow(color: .black.opacity(0.6), radius: 34, y: 14)
     }
 }
 
