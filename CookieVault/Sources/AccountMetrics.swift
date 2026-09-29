@@ -24,7 +24,7 @@ public struct AccountMetrics: Equatable {
     // Canonical numeric metric keys, in a sensible display order.
     public static let metricOrder = [
         "followers", "following", "subs", "views", "videos", "likes", "friends",
-        "karma", "coins", "cc", "balance", "tracks", "playlists", "credits",
+        "karma", "coins", "cc", "balance", "earn", "biz", "tracks", "playlists", "credits",
         "games", "projects", "upload", "mems", "companies"
     ]
     public static let flagOrder = [
@@ -37,6 +37,9 @@ public struct AccountMetrics: Equatable {
         case "twofa": return "2FA"
         case "subs": return "Subs"
         case "balance": return "Balance"
+        case "earn": return "Earned"
+        case "biz": return "Business"
+        case "mems": return "Members"
         default: return k.prefix(1).uppercased() + k.dropFirst()
         }
     }
@@ -69,6 +72,10 @@ public struct AccountMetrics: Equatable {
         case "uploads": return "upload"
         case "playlist": return "playlists"
         case "track": return "tracks"
+        case "bal": return "balance"
+        case "earnings", "earned": return "earn"
+        case "business": return "biz"
+        case "members", "member", "memberships": return "mems"
         default: return w
         }
     }
@@ -133,9 +140,12 @@ public struct AccountMetrics: Equatable {
             }
         }
 
-        // Also catch key=value pairs anywhere (SoundCloud: "followers=30 tracks=…")
-        for m in allGroups(#"([a-z]+)\s*[=:]\s*(\d+(?:\.\d+)?)"#, name.lowercased()) where m.count == 2 {
-            if let n = Double(m[1]) { out.metrics[normMetric(m[0])] = n }
+        // Also catch key=value pairs anywhere, incl. money with a $ and thousands separators
+        // (SoundCloud "followers=30", Whop "bal=$0.00, earn=$1,234.5, mems=3").
+        for m in allGroups(#"([a-z]+)\s*[=:]\s*\$?([0-9][0-9.,]*)"#, name.lowercased()) where m.count == 2 {
+            let num = m[1].replacingOccurrences(of: ",", with: "")
+            // Guard against a stray trailing dot ("mems=3_" already trimmed by regex).
+            if let n = Double(num) { out.metrics[normMetric(m[0])] = n }
         }
         return out
     }

@@ -181,6 +181,7 @@ public enum APIKeyChecker {
         case "nuget": return mk("Package Registry", "NuGet push API key.", ["Token format"])
         case "pubnub": return mk("Realtime / Messaging", "PubNub pub/sub/secret key.", ["Key role (pub/sub/secret)"])
         case "pypi": return mk("Package Registry", "PyPI upload token.", ["Token format"])
+        case "steam", "steam_web_api", "steam_api": return mk("Games", "Steam Web API key.", ["Validity", "Rate limit", "Latency"])
         case "twilio_verify": return mk("Comms", "Twilio verify key.", ["Account", "Status"])
         default:
             return mk("API Key", "Third-party API credential.", ["Validity", "HTTP status", "Latency", "Any returned account detail"])
@@ -228,7 +229,7 @@ public enum APIKeyChecker {
             "databricks": "https://accounts.cloud.databricks.com", "azure_storage": "https://portal.azure.com",
             "brightdata": "https://brightdata.com/cp/setting", "mongodb_atlas": "https://cloud.mongodb.com",
             "nuget": "https://www.nuget.org/account/apikeys", "pubnub": "https://admin.pubnub.com",
-            "pypi": "https://pypi.org/manage/account/token/"
+            "pypi": "https://pypi.org/manage/account/token/", "steam": "https://steamcommunity.com/dev/apikey"
         ]
         return map[s]
     }
@@ -509,6 +510,7 @@ public enum APIKeyChecker {
         case "nuget":         return checkNuGet(key: trimmedKey)
         case "pubnub":        return checkPubNub(key: trimmedKey)
         case "pypi":          return checkPyPI(key: trimmedKey)
+        case "steam", "steam_web_api", "steam_api": return await checkSteam(key: trimmedKey)
         case "all_discord_tokens", "valid_discord_tokens", "discord_user":
             return await checkDiscordUser(key: trimmedKey)
 
@@ -809,6 +811,30 @@ public enum APIKeyChecker {
     // PyPI — upload token (pypi-…); validated only on publish.
     private static func checkPyPI(key: String) -> CheckResult {
         return formatOnly("PyPI Upload Token", key: key, minLen: 16)
+    }
+
+    // Steam Web API key (32 hex). GetPlayerSummaries requires a valid key: 200 ok, 403 invalid.
+    private static func checkSteam(key: String) async -> CheckResult {
+        let k = key.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=\(k)&steamids=76561197960435530") else {
+            return CheckResult(status: .error, snippet: "Invalid URL")
+        }
+        let start = Date()
+        do {
+            let (data, response) = try await APIKeyChecker.send(URLRequest(url: url, timeoutInterval: 10))
+            let latency = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200 {
+                var d = KeyDetails(); d.latencyMs = latency; d.httpCode = 200
+                d.planOrTier = "Steam Web API Key"
+                d.balanceOrQuota = "100k calls/day"
+                d.rawSnippet = String(data: data.prefix(300), encoding: .utf8)
+                return CheckResult(status: .valid, snippet: "Valid Steam Web API key", details: d)
+            }
+            if code == 403 { return CheckResult(status: .invalid, snippet: "Invalid Steam Web API key (HTTP 403)") }
+            if code == 429 { return CheckResult(status: .rateLimited, snippet: "Steam rate limited (HTTP 429)") }
+            return CheckResult(status: .error, snippet: "HTTP \(code)")
+        } catch { return CheckResult(status: .error, snippet: error.localizedDescription) }
     }
 
     // MARK: - Auto-Detection

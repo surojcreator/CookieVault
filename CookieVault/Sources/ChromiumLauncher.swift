@@ -226,6 +226,83 @@ public final class ChromiumLauncher {
         _ = try await cdp.send("Page.navigate", ["url": targetURL.absoluteString], sessionId: sessionId)
     }
 
+    /// Launch an isolated browser, load `startURL`, then run `injectJS` once the page is up.
+    /// Used to log into token-based web apps (e.g. Discord) that store auth in localStorage
+    /// rather than cookies. The isolated profile is wiped when the window closes.
+    public func launchTokenSite(startURL: URL,
+                                injectJS: String,
+                                profileKey: String,
+                                binary: String? = nil,
+                                progress: @escaping (String) -> Void) async throws {
+        guard let bin = binary ?? anyBinary() else { throw ChromiumLauncherError.noBrowser }
+        let port = Self.freePort()
+        let safeKey = profileKey.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "_", options: .regularExpression)
+        let profile = sessionsDir.appendingPathComponent("cv_\(safeKey.isEmpty ? "s" : safeKey)_\(UUID().uuidString)", isDirectory: true)
+
+        progress("Starting browser…")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: bin)
+        task.arguments = [
+            "--user-data-dir=\(profile.path)", "--remote-debugging-port=\(port)", "--remote-allow-origins=*",
+            "--no-first-run", "--no-default-browser-check", "--no-service-autorun", "--password-store=basic",
+            "--disable-sync", "--disable-blink-features=AutomationControlled", "--exclude-switches=enable-automation",
+            "--disable-features=IsolateOrigins,site-per-process,AutomationControlled", "about:blank",
+        ]
+        try task.run()
+        trackSession(task)
+        Task.detached(priority: .background) { task.waitUntilExit(); try? FileManager.default.removeItem(at: profile) }
+
+        progress("Connecting to DevTools…")
+        let wsURL = try await waitForDebugger(port: port, timeout: 20)
+        let cdp = try await CDPClient.connect(wsURL: wsURL)
+        defer { cdp.close() }
+
+        var targetId: String? = nil
+        for _ in 0..<20 {
+            let res = try await cdp.send("Target.getTargets")
+            if let infos = res["targetInfos"] as? [[String: Any]],
+               let page = infos.first(where: { ($0["type"] as? String) == "page" }) { targetId = page["targetId"] as? String; break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if targetId == nil { targetId = try await cdp.send("Target.createTarget", ["url": "about:blank"])["targetId"] as? String }
+        guard let targetId else { throw ChromiumLauncherError.badResponse("no targetId") }
+        let attached = try await cdp.send("Target.attachToTarget", ["targetId": targetId, "flatten": true])
+        guard let sessionId = attached["sessionId"] as? String else { throw ChromiumLauncherError.badResponse("no sessionId") }
+
+        _ = try? await cdp.send("Page.enable", [:], sessionId: sessionId)
+        _ = try? await cdp.send("Runtime.enable", [:], sessionId: sessionId)
+        _ = try? await cdp.send("Page.addScriptToEvaluateOnNewDocument",
+                                ["source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"], sessionId: sessionId)
+
+        progress("Opening \(startURL.host ?? "site")…")
+        _ = try await cdp.send("Page.navigate", ["url": startURL.absoluteString], sessionId: sessionId)
+        // Give the SPA time to initialize before we inject the auth into its origin.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        progress("Signing in…")
+        _ = try? await cdp.send("Runtime.evaluate", ["expression": injectJS, "awaitPromise": false], sessionId: sessionId)
+    }
+
+    /// Build the JS that logs a Discord web session in from a user token. Discord deletes
+    /// `window.localStorage`, so we write the token through a fresh iframe's localStorage (same
+    /// origin) and then navigate to the app.
+    public static func discordLoginJS(token: String) -> String {
+        // Discord stores localStorage.token as the JSON string of the token (i.e. quoted).
+        // Sanitize the token of characters that could break the literal (real tokens have none).
+        let safe = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+        return """
+        (function(){ try {
+          var i=document.createElement('iframe'); document.body.appendChild(i);
+          i.contentWindow.localStorage.setItem('token', '"\(safe)"');
+          i.remove();
+        } catch(e){}
+        setTimeout(function(){ location.href='https://discord.com/channels/@me'; }, 400);
+        })();
+        """
+    }
+
     /// Maps our `Cookie` model to CDP `Network.CookieParam` dictionaries.
     ///
     /// Key correctness details for keeping a session alive once you interact with the page:

@@ -218,6 +218,10 @@ struct APIFileDetailView: View {
 
     private var providerInfo: APIKeyChecker.ProviderInfo { APIKeyChecker.providerInfo(service: vm.file.service) }
 
+    static func isDiscord(_ service: String) -> Bool {
+        ["discord_user", "all_discord_tokens", "valid_discord_tokens"].contains(service.lowercased())
+    }
+
     private var topBar: some View {
         HStack(spacing: 14) {
             IconTile(symbol: vm.file.icon, tint: Theme.gold, size: 44)
@@ -368,7 +372,8 @@ struct APIFileDetailView: View {
                                   onSelectToggle: {
                                       if vm.selectedIDs.contains(key.id) { vm.selectedIDs.remove(key.id) }
                                       else { vm.selectedIDs.insert(key.id) }
-                                  })
+                                  },
+                                  onOpen: Self.isDiscord(vm.file.service) ? { store.openDiscordToken(key) } : nil)
                     }
                 }
             }
@@ -444,6 +449,7 @@ struct APIKeyRow: View {
     var selectMode: Bool = false
     var isSelected: Bool = false
     var onSelectToggle: () -> Void = {}
+    var onOpen: (() -> Void)? = nil
     @StateObject private var hover = KeyRowHover()
     @StateObject private var vis = KeyVisibility()
 
@@ -480,6 +486,15 @@ struct APIKeyRow: View {
                 }
 
                 Spacer()
+
+                if let onOpen {
+                    Button(action: onOpen) {
+                        HStack(spacing: 4) { Image(systemName: "arrow.up.forward.app"); Text("Open") }
+                            .font(.system(size: 10, weight: .semibold)).foregroundColor(Color(hex: "5865f2"))
+                            .padding(.horizontal, 9).padding(.vertical, 6)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: "5865f2").opacity(0.14)))
+                    }.buttonStyle(.plain).help("Open this account in an isolated logged-in browser")
+                }
 
                 Button(action: onInspect) {
                     HStack(spacing: 4) { Image(systemName: "magnifyingglass"); Text("Details") }
@@ -788,7 +803,8 @@ struct AllValidKeysView: View {
                     ForEach(keys) { key in
                         APIKeyRow(key: key, service: file.service,
                                   onCheck: { Task { await store.checkKey(key, in: file) } },
-                                  onInspect: { store.selectedAPIFile = file; store.inspectedKey = key })
+                                  onInspect: { store.selectedAPIFile = file; store.inspectedKey = key },
+                                  onOpen: APIFileDetailView.isDiscord(file.service) ? { store.openDiscordToken(key) } : nil)
                     }
                 }
             }

@@ -1419,6 +1419,31 @@ public class AppStore: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    /// Open a Discord USER token in an isolated logged-in browser (token injected into
+    /// discord.com's localStorage). The profile is ephemeral and wiped on close.
+    public func openDiscordToken(_ key: APIKey) {
+        let token = key.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { showToast("Empty token", type: .warning); return }
+        let launcher = ChromiumLauncher.shared
+        Task { @MainActor in
+            if launcher.anyBinary() == nil {
+                guard promptDownloadChromium() else { showToast("Launch cancelled — no Chromium", type: .warning); return }
+                isLaunching = true
+                do { _ = try await launcher.downloadChromium { f, m in Task { @MainActor in self.launchStatus = m; self.launchProgress = f } } }
+                catch { isLaunching = false; launchStatus = ""; showToast("Chromium download failed", type: .error); return }
+            }
+            isLaunching = true; launchProgress = 0; launchStatus = "Opening Discord…"
+            do {
+                try await launcher.launchTokenSite(
+                    startURL: URL(string: "https://discord.com/login")!,
+                    injectJS: ChromiumLauncher.discordLoginJS(token: token),
+                    profileKey: "discord_\(token.prefix(6))") { msg in Task { @MainActor in self.launchStatus = msg } }
+                showToast("Opened Discord in isolated browser", type: .success)
+            } catch { showToast("Open failed: \(error.localizedDescription)", type: .error) }
+            isLaunching = false; launchStatus = ""; launchProgress = 0
+        }
+    }
+
     /// Send a harmless test message through a webhook key (Discord/Slack/Teams).
     @MainActor
     public func sendWebhookTest(_ key: APIKey, service: String) async {
@@ -2154,7 +2179,9 @@ public class AppStore: ObservableObject {
             "mongodb_atlas":        .init(displayName: "MongoDB Atlas",       icon: "leaf.circle.fill", endpoint: nil),
             "nuget":                .init(displayName: "NuGet",               icon: "cube.box.fill", endpoint: nil),
             "pubnub":               .init(displayName: "PubNub",              icon: "dot.radiowaves.left.and.right", endpoint: nil),
-            "pypi":                 .init(displayName: "PyPI",                icon: "cube.transparent.fill", endpoint: nil)
+            "pypi":                 .init(displayName: "PyPI",                icon: "cube.transparent.fill", endpoint: nil),
+            "steam":                .init(displayName: "Steam Web API",       icon: "gamecontroller.fill", endpoint: nil),
+            "steam_web_api":        .init(displayName: "Steam Web API",       icon: "gamecontroller.fill", endpoint: nil)
         ]
 
         return map[s] ?? .init(displayName: s.replacingOccurrences(of: "_", with: " ").capitalized, icon: "key.fill", endpoint: nil)
