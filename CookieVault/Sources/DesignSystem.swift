@@ -81,6 +81,11 @@ extension View {
 }
 
 // MARK: - Icon tile (rounded gradient/tinted square with an SF Symbol)
+//
+// A single glyph container used everywhere (sidebar, cards, headers). The look is
+// a soft "squircle" with a top highlight for gentle curvature, a hairline edge so
+// the tile reads crisply on dark surfaces, and — when filled — a colored glow plus
+// a subtle glyph shadow for depth.
 
 struct IconTile: View {
     let symbol: String
@@ -88,16 +93,32 @@ struct IconTile: View {
     var size: CGFloat = 44
     var filled: Bool = false        // true = gradient fill + white glyph
     var body: some View {
+        let corner = size * 0.28
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(filled ? AnyShapeStyle(LinearGradient(colors: [tint, tint.opacity(0.72)],
-                                                            startPoint: .topLeading, endPoint: .bottomTrailing))
-                             : AnyShapeStyle(tint.opacity(0.16)))
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(filled
+                      ? AnyShapeStyle(LinearGradient(colors: [tint.opacity(0.98), tint.opacity(0.68)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                      : AnyShapeStyle(LinearGradient(colors: [tint.opacity(0.22), tint.opacity(0.11)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing)))
                 .frame(width: size, height: size)
-                .shadow(color: filled ? tint.opacity(0.35) : .clear, radius: 8, y: 3)
+                // Top-edge sheen for a subtle glassy curvature.
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .fill(LinearGradient(colors: [Color.white.opacity(filled ? 0.30 : 0.12), .clear],
+                                             startPoint: .top, endPoint: .center))
+                        .blendMode(.plusLighter)
+                )
+                // Crisp hairline edge.
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .strokeBorder(filled ? Color.white.opacity(0.20) : tint.opacity(0.32), lineWidth: 1)
+                )
+                .shadow(color: filled ? tint.opacity(0.42) : .clear, radius: size * 0.22, y: 3)
             Image(systemName: symbol)
                 .font(.system(size: size * 0.42, weight: .semibold))
                 .foregroundColor(filled ? .white : tint)
+                .shadow(color: filled ? Color.black.opacity(0.20) : .clear, radius: 1, y: 1)
         }
     }
 }
@@ -173,8 +194,21 @@ struct FilledButton: View {
         }
         .foregroundColor(.white)
         .padding(.horizontal, compact ? 12 : 16).padding(.vertical, compact ? 7 : 10)
-        .background(RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous).fill(gradient))
-        .shadow(color: glow.opacity(0.35), radius: 8, y: 3)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous).fill(gradient)
+                // Top sheen for a raised, tactile feel.
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                        .fill(LinearGradient(colors: [Color.white.opacity(0.22), .clear],
+                                             startPoint: .top, endPoint: .center))
+                        .blendMode(.plusLighter)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.rSm, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+        )
+        .shadow(color: glow.opacity(0.38), radius: 9, y: 3)
     }
 }
 
@@ -201,10 +235,11 @@ struct IconButton: View {
     var tint: Color = Theme.textSec
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundColor(tint)
             .frame(width: 28, height: 28)
-            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(tint.opacity(0.10)))
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(tint.opacity(0.12)))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(tint.opacity(0.18), lineWidth: 1))
     }
 }
 
