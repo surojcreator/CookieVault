@@ -564,7 +564,8 @@ struct CookieAccountCard: View {
 
     var brand: ServiceBrand { ServiceBrandHelper.brand(for: file.serviceName ?? file.folderName ?? file.name) }
     var isPremium: Bool { file.tier == .premium }
-    var allExpired: Bool { !file.cookies.isEmpty && file.cookies.allSatisfy { $0.isExpired } }
+    // A session is live only if at least one cookie is still unexpired (an empty file is not "valid").
+    var hasLiveSession: Bool { file.cookies.contains { !$0.isExpired } }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -579,7 +580,7 @@ struct CookieAccountCard: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    StatusDot(ok: !allExpired, okText: "Valid session", badText: "Expired")
+                    StatusDot(ok: hasLiveSession, okText: "Valid session", badText: "Expired")
                     Text("·").foregroundColor(Theme.textTer)
                     Text("\(file.cookies.count) cookies").font(.system(size: 11)).foregroundColor(Theme.textSec)
                     if let domain = file.cookies.first?.domain {

@@ -775,11 +775,22 @@ public class AppStore: ObservableObject {
             "udemy": "Udemy", "venice": "Venice", "whop": "Whop", "youtube": "YouTube", "chess": "Chess.com",
             "blackbox": "Blackbox AI", "booking": "Booking.com", "ebay": "eBay", "trustpilot": "Trustpilot",
             "patched": "Patched", "minecraft": "Minecraft", "supercell": "Supercell", "magnific": "Magnific",
-            "hotmail": "Outlook", "roblox": "Roblox"
+            "hotmail": "Outlook", "roblox": "Roblox",
+            // Extra brands (kept in sync with ServiceBrandHelper so import-folder names map cleanly).
+            "disneyplus": "Disney+", "disney": "Disney+", "paramountplus": "Paramount+", "paramount": "Paramount+",
+            "hulu": "Hulu", "tidal": "Tidal", "gemini": "Gemini", "midjourney": "Midjourney",
+            "stackoverflow": "Stack Overflow", "vercel": "Vercel", "netlify": "Netlify",
+            "playstation": "PlayStation", "xbox": "Xbox", "nintendo": "Nintendo", "airbnb": "Airbnb",
+            "paypal": "PayPal", "coinbase": "Coinbase", "binance": "Binance", "apple": "Apple",
+            "notion": "Notion", "figma": "Figma", "canva": "Canva", "adobe": "Adobe", "dropbox": "Dropbox",
+            "slack": "Slack", "zoom": "Zoom", "nordvpn": "NordVPN", "expressvpn": "ExpressVPN",
+            "snapchat": "Snapchat", "threads": "Threads", "onlyfans": "OnlyFans"
         ]
         if let exact = map[key] { return exact }
         // Fall back to a contains match for compound names ("mihoyo_hoyolab" already keyed).
-        for (k, v) in map where key.contains(k) { return v }
+        // Iterate keys longest-first so the match is deterministic and the most specific key wins
+        // (dictionary order is otherwise unspecified across launches).
+        for k in map.keys.sorted(by: { $0.count > $1.count }) where key.contains(k) { return map[k] }
         return nil
     }
 
@@ -1402,6 +1413,17 @@ public class AppStore: ObservableObject {
         apiKeyFiles[idx].keys.removeAll { ids.contains($0.id) }
         save()
         showToast("Deleted \(ids.count) key\(ids.count == 1 ? "" : "s")", type: .info)
+    }
+
+    /// QoL: after a check, prune every key that came back invalid (keeps valid / quota / unchecked).
+    public func deleteInvalidKeys(in file: APIKeyFile) {
+        guard let f = apiKeyFiles.first(where: { $0.id == file.id }) else { return }
+        let invalid = f.keys.filter { $0.status == .invalid }
+        guard !invalid.isEmpty else { showToast("No invalid keys to remove", type: .info); return }
+        guard confirmDestructive(title: "Delete \(invalid.count) invalid key\(invalid.count == 1 ? "" : "s")?",
+                                 info: "Removes every key in “\(file.displayName)” that failed its last check. Valid, quota-limited, and unchecked keys are kept.",
+                                 confirmTitle: "Delete Invalid") else { return }
+        deleteKeys(Set(invalid.map { $0.id }), in: file)
     }
 
     @MainActor

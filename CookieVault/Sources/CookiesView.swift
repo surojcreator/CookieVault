@@ -344,12 +344,14 @@ struct CookieDetailPanel: View {
     let file: CookieFile
     @StateObject private var vm = CookieDetailVM()
 
+    private var brand: ServiceBrand { ServiceBrandHelper.brand(for: file.serviceName ?? file.folderName ?? file.name) }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
-                        IconTile(symbol: "puzzlepiece.extension.fill", tint: Theme.accent, size: 40, filled: true)
+                        IconTile(symbol: brand.icon, tint: Color(hex: brand.colorHex), size: 40, filled: true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(cookie.name).font(.system(size: 15, weight: .bold)).foregroundColor(Theme.textPri).lineLimit(1)
                             Text(cookie.domain).font(.system(size: 12)).foregroundColor(Theme.accent2).lineLimit(1)

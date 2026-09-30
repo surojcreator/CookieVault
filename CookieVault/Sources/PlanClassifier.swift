@@ -166,11 +166,8 @@ public enum PlanClassifier {
             if firstPremium() != nil || has("monthly") || has("yearly") { return (.premium, "Plex Pass") }
             return (.unknown, nil)
         }
-        if svc.contains("crunchyroll") {
-            if hasFree() { return (.free, "Free") }
-            if let p = firstPremium() { return (.premium, prettyPlan(p)) }
-            return (.unknown, nil)
-        }
+        // NB: Crunchyroll is fully handled by the raw-filename block above (it always returns),
+        // so no bracket-token fallback is needed here.
         if svc.contains("canal") { return hasFree() && firstPremium() == nil ? (.free, "Free") : (firstPremium() != nil ? (.premium, "Premium") : (.unknown, nil)) }
 
         // ── Flag-based premium (paid perk is a boolean) ─────────────────────────

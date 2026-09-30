@@ -97,8 +97,10 @@ final class ProxyAuthDelegate: NSObject, URLSessionTaskDelegate {
     }
 }
 
-// A URLSession paired with a strong reference to its delegate (URLSession only holds it weakly
-// in some configurations, so we retain it here).
+// A URLSession paired with its auth delegate. A URLSession created with a delegate keeps a
+// STRONG reference to that delegate until the session is invalidated — so without the deinit
+// below, every proxy-pool rebuild would leak a session + delegate. `finishTasksAndInvalidate()`
+// lets any in-flight check complete before the session (and its delegate) are released.
 final class ProxySession {
     let session: URLSession
     private let delegate: ProxyAuthDelegate?
@@ -117,4 +119,6 @@ final class ProxySession {
         self.session = URLSession(configuration: cfg, delegate: del, delegateQueue: nil)
         self.label = direct ? "direct" : (config?.label ?? "proxy")
     }
+
+    deinit { session.finishTasksAndInvalidate() }
 }

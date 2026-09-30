@@ -407,6 +407,11 @@ struct APIFileDetailView: View {
 
             Spacer()
 
+            Button { store.deleteInvalidKeys(in: vm.file) } label: {
+                GhostButton(title: "Delete Invalid (\(count(.invalid)))", systemImage: "xmark.bin", tint: Theme.red)
+            }.buttonStyle(.plain).disabled(count(.invalid) == 0).opacity(count(.invalid) == 0 ? 0.4 : 1)
+                .help("Remove every key that failed its last check")
+
             Button { store.deleteAPIKeyFile(vm.file) } label: {
                 GhostButton(title: "Delete File", systemImage: "trash", tint: Theme.red)
             }.buttonStyle(.plain)
